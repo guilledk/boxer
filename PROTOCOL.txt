@@ -1,0 +1,189 @@
+BOXER PROTOCOL v0.1.0 - jsonrpc 2.0
+
+https://github.com/dwoz/python-nat-hole-punching
+https://bford.info/pub/net/p2pnat/
+
+boxer is a simple protocol for udp hole punching and for udp multiport compatible programs to publish connection information.
+
+every time we open a new conection we first exchange encription keys.
+
+generic protocol error:
+-----------------------
+{
+    "jsonrpc": "2.0",
+    "error": {
+        "code": "0",
+        "message": "protocol error"
+    },
+    "id": "{uid}"
+}
+
+
+key-ex:
+-------
+
+{
+    "jsonrpc": "2.0",
+    "method": "key-ex",
+    "params": {
+        "pkey": "{hex encoded ed25519 public key}"
+    }
+    "id": "{unique for this session}"
+}
+ret:
+{
+    "jsonrpc": "2.0",
+    "result": "{boxer server ed25519 public key}",
+    "id": "{uid}"
+}
+
+introduction:
+-------------
+
+the first time a node opens a conections the node uuid is broadcasted to all connected peers.
+
+{
+    "jsonrpc": "2.0",
+    "method": "introduction",
+    "params": {
+        "name": "{node non unique name}",
+        "desc": "{service description (optional)}",
+        "secret": {empty obj (optional, if this field is present, this node info is not published)}
+    }
+    "id": "{unique for this session}"
+}
+ret:
+{
+    "jsonrpc": "2.0",
+    "result": "ok",
+    "id": "{uid}"
+}
+
+
+from node to server:
+
+    goodbye:
+    --------
+
+    used to end the connnection.
+
+    {
+        "jsonrpc": "2.0",
+        "method": "goodbye",
+        "params": {},
+        "id": "{unique for this session}"
+    }
+
+    ret:
+    {
+        "jsonrpc": "2.0",
+        "result": "goodbye",
+        "id": "{uid}"
+    }
+
+    fight(node):
+    --------------
+
+    happens when a node wants to perform udp hole punching to get to another node.
+
+    {
+        "jsonrpc": "2.0",
+        "method": "fight",
+        "params": {
+            "target": "{node pkey}"
+        },
+        "id": "{unique for this session}"
+    }
+
+        err invalid target:
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": "1",
+                "message": "node not found"
+            },
+            "id": "{uid}"
+        }
+
+
+        fight will begin an udp hole punch attempt
+
+        the server will generate a fight id used for now on to id this fight.
+        the server will send a fight request to the node in question:
+
+        fight(server):
+        --------------
+
+        {
+            "jsonrpc": "2.0",
+            "method": "fight",
+            "params": {
+                "with": "{node public key}"
+                "fid": "{fid}"
+            },
+            "id": "{unique for this session}"
+        }
+
+        the node can either "take" the fight or "evade" it:
+
+        {
+            "jsonrpc": "2.0",
+            "result": "{take|evade}",
+            "id": "{uid}"
+        }
+
+    a return to the original fight request is issued:
+
+        {
+                "jsonrpc": "2.0",
+                "result": "{fid|evade}",
+                "id": "{uid}"
+            }
+
+    after a fight is taken both clients must send a punch rpc to the server:
+
+    punch:
+    ------
+
+    {
+        "jsonrpc": "2.0",
+        "method": "punch",
+        "params": {
+            "fid": "{fid}"
+        },
+        "id": "{unique for this session}"
+    }
+
+    the server will wait till the other node sends its punch packet and then it will return the others external endpoint.
+
+    ret:
+    {
+        "jsonrpc": "2.0",
+        "result": {
+            "host": "{node ip}",
+            "port": {node port}
+        }",
+        "id": "{uid}"
+    }
+
+from server to node:
+
+    event:
+    ------
+
+    an event is generated when a node either joins or leaves the p2p boxer network.
+
+    {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "{introduction|goodbye}",
+            "pkey": "{hex encoded node ed21559 key}",
+            if "type" == "introduction":
+            "name": "{node non unique name}",
+            "desc": "{service description (optional)}"
+        },
+        "id": "{unique for this session}"
+    }
+
+    no ret
