@@ -6,7 +6,7 @@ import socket
 
 from nacl.public import PublicKey, PrivateKey, Box
 
-from aplutils import AsyncQueue, SessionIDManager
+from triopatterns import AsyncQueue, SessionIDManager
 
 
 def addr_has_str(addr):

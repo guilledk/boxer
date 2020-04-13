@@ -40,7 +40,7 @@ ret:
 introduction:
 -------------
 
-the first time a node opens a conections the node uuid is broadcasted to all connected peers.
+if the node is not secret node service information will be shared with all conected nodes.
 
 {
     "jsonrpc": "2.0",
@@ -135,10 +135,10 @@ from node to server:
     a return to the original fight request is issued:
 
         {
-                "jsonrpc": "2.0",
-                "result": "{fid|evade}",
-                "id": "{uid}"
-            }
+            "jsonrpc": "2.0",
+            "result": "{fid|evade}",
+            "id": "{uid}"
+        }
 
     after a fight is taken both clients must send a punch rpc to the server:
 
@@ -166,6 +166,8 @@ from node to server:
         "id": "{uid}"
     }
 
+    after that nodes can begin udp hole punching attempts
+
 from server to node:
 
     event:
@@ -186,4 +188,4 @@ from server to node:
         "id": "{unique for this session}"
     }
 
-    no ret
+    no return

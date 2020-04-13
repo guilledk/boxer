@@ -8,7 +8,7 @@ from boxer.core import BoxerServer, id_matcher
 
 from nacl.public import PrivateKey, PublicKey, Box
 
-from aplutils import AsyncQueue, SessionIDManager
+from triopatterns import AsyncQueue, SessionIDManager
 
 
 def wildcard_matcher(*args):
