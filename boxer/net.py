@@ -12,6 +12,12 @@ PACKET_LENGTH = 1024
 
 
 class UDPContext:
+    """
+    A UDP Context represents a  conection with a remote udp endpoint at "addr",
+    can  performing a  background key exchange using  "key" as its  private key
+    it grants  an simple interface for  encrypted comunications through  socket
+    "sock".
+    """
 
     def __init__(
         self,
@@ -69,6 +75,12 @@ class UDPContext:
 
 class UDPGate:
 
+    """
+    For each  address that sends a user datagram to this socket a UDPContext is
+    created  and it's key exchange is started, saves  contexts in a  dictionary
+    indexed by recipient address.
+    """
+
     def __init__(
         self,
         nursery
@@ -76,7 +88,7 @@ class UDPGate:
 
         self.nursery = nursery
 
-        self.in = {}
+        self.contexts = {}
         self.key = PrivateKey.generate()
         self.sock = trio.socket.socket(
             socket.AF_INET,
@@ -106,9 +118,9 @@ class UDPGate:
                         self.sock
                         )
                     udpctx.start_bgkeyex(self.nursery)
-                    self.in[addr] = udpctx
+                    self.contexts[addr] = udpctx
 
-                await self.in[addr].inbound.send(data)
+                await self.contexts[addr].inbound.send(data)
 
     def close(self):
         if hasattr(self, "inbound_cscope"):
