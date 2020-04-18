@@ -32,7 +32,7 @@ Boxer is simple UDP hole punching protocol:
 https://github.com/dwoz/python-nat-hole-punching
 https://bford.info/pub/net/p2pnat/
 
-A Boxer server listens from incoming node "intoductions" and broadcasts them to all conected nodes, based on their public key nodes can request "fights" where the server arranges for the exchange of external endpoint information between nodes and then through "punch" packets perform NAT traversal.
+A Boxer server listens from incoming node "introductions" and broadcasts them to all conected nodes, based on their public key nodes can request "fights" where the server arranges for the exchange of external endpoint information between nodes and then through "punch" packets perform NAT traversal.
 
 Look at ![PROTOCOL.txt](PROTOCOL.txt) for more information.
 
