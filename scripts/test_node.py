@@ -2,64 +2,106 @@
 
 import trio
 import socket
+import logging
+import argparse
 
 from boxer.node import BoxerNode
 
 
-async def packet_printer(sock, box):
-
-    while True:
-        enc_msg, addr = await sock.recvfrom(1024)
-        msg = box.decrypt(enc_msg)
-        print(f"recieved {msg} from {addr}")
-
-
 async def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-i", "--ip", type=str,
+        help=f"set boxer server ip"
+        )
+    parser.add_argument(
+        "-p", "--port", type=int,
+        help=f"set boxer server port"
+        )
+    parser.add_argument(
+        "-n", "--name", type=str,
+        help=f"set a name for this node"
+        )
+
+    parser.add_argument(
+        "-d", "--desc", type=str,
+        help=f"set a description for this node"
+        )
+    parser.add_argument(
+        "-f", "--fight", type=str,
+        help=f"fight a node"
+        )
+    args = parser.parse_args()
 
     async with trio.open_nursery() as nursery:
 
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s %(message)s',
+            datefmt='%d-%b-%y %H:%M:%S'
+            )
+
         bnode = BoxerNode(
-            socket.gethostname(),
+            (
+                args.ip if args.ip else "127.0.0.1",
+                args.port if args.port else 12000
+                ),
             nursery
             )
 
-        await bnode.introduce()
-
-        if bnode.name != "raspberrypi":
-            while True:
-                await trio.sleep(0.1)
-                if len(bnode.node_directory) == 1:
-                    print(bnode.node_directory)
-                    break
-
-            rpi = ""
-            for key, node in bnode.node_directory.items():
-                if node["name"] == "raspberrypi":
-                    rpi = key
-
-            await bnode.fight(rpi)
-
-        remote_addr, remote_box, remote_sock = await bnode.connections.receive()
-
-        nursery.start_soon(
-            packet_printer,
-            remote_sock,
-            remote_box
+        await bnode.introduction(
+            args.name if args.name else socket.gethostname(),
+            desc=args.desc if args.desc else "",
+            secret=False
             )
 
-        for x in range(10):
-            await remote_sock.sendto(
-                remote_box.encrypt(
+        try:
+            remote_ctx = None
+            in_cscope = trio.CancelScope()
+
+            if args.fight:
+                found = False
+                while not found:
+                    event = await bnode.events.receive()
+
+                    if event["name"] == args.fight:
+                        found = True
+
+                remote_ctx = await bnode.fight(event["pkey"])
+            else:
+                fid, remote_ctx = await bnode.fights.receive()
+
+            async def packet_printer(remote_ctx, cscope):
+                with cscope:
+                    async with remote_ctx.inbound.subscribe(
+                        lambda *args: True,
+                        history=True
+                            ) as in_queue:
+                        while True:
+                            msg = await in_queue.receive()
+                            print(f"recieved {msg} from {repr(remote_ctx)}")
+
+            for x in range(10):
+                await remote_ctx.send_raw(
                     f"hello from peer! - {x}".encode("utf-8")
-                    ),
-                remote_addr
+                    )
+
+            nursery.start_soon(
+                packet_printer,
+                remote_ctx,
+                in_cscope
                 )
 
-        try:
             await trio.sleep_forever()
+
         except KeyboardInterrupt:
             pass
+
         finally:
+            in_cscope.cancel()
+            if remote_ctx is not None:
+                remote_ctx.stop_inbound()
             await bnode.goodbye()
 
 trio.run(main)

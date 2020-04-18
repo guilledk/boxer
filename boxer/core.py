@@ -1,59 +1,20 @@
 #!/usr/bin/env python3
 
-import json
 import trio
-import socket
+import logging
 
 from nacl.public import PublicKey, PrivateKey, Box
 
 from triopatterns import AsyncQueue, SessionIDManager
 
+from boxer.net import UDPGate
 
-def addr_has_str(addr):
-    assert len(addr) == 2
-    return f"{addr[0]}:{addr[1]}"
-
-
-# matches id field from a json obj
-def id_matcher(*args):
-    obj = args[0]
-    uid = args[1]
-    try:
-        assert isinstance(obj, dict)
-        assert obj is not None
-        assert "id" in obj
-        assert str(uid) == obj["id"]
-        return True
-    except AssertionError:
-        return False
-
-
-def attempt_decrypt_match_id(*args):
-    tpl = args[0]
-    uid = args[1]
-    box = args[2]
-    try:
-        assert tpl is not None
-        assert len(tpl) == 2
-        obj = json.loads(
-            box.decrypt(tpl[0]).decode("utf-8")
-            )
-        assert "id" in obj
-        assert str(uid) == obj["id"]
-        return True
-    except AssertionError:
-        return False
-
-
-# matches first element of tuple as hex encoded pkey
-def pkey_matcher(*args):
-    obj = args[0]
-    key = args[1]
-    try:
-        assert obj[0] == key
-        return True
-    except AssertionError:
-        return False
+from boxer.rpc import (
+    JSONRPCRequest,
+    JSONRPCResponseResult,
+    JSONRPCResponseError,
+    rpc_request_mod
+    )
 
 
 class BoxerRemoteNode:
@@ -61,130 +22,110 @@ class BoxerRemoteNode:
     def __init__(
         self,
         key,
-        server,
-        secret=False
+        server
             ):
 
         self.key = key
         self.server = server
-        self.secret = secret
 
         self.box = Box(self.server.key, self.key)
-        self.inbound = AsyncQueue()
         self.event_queue = AsyncQueue()
         self.pcktidmngr = SessionIDManager()
+        self.rpc_cscopes = []
 
-        self.methods = {}
+    # event outbound queue
+    async def event_consumer(self):
+        with trio.CancelScope() as self.event_cscope:
+            while True:
+                event = await self.event_queue.receive()
+                await self.main_ctx.send_json(
+                    JSONRPCRequest(
+                        "event",
+                        event,
+                        self.pcktidmngr.getid()
+                        ).as_json()
+                    )
 
-        self.methods["fight"] = self.boxer_fight
-        self.methods["punch"] = self.boxer_punch
-        self.methods["goodbye"] = self.boxer_goodbye
+    # rpc inbound queue
+    async def rpc_request_consumer(self, ctx):
 
-    def start(self):
-        self.server.nursery.start_soon(
-            self.session_consumer
-            )
+        methods = {}
 
-    def stop(self):
-        if hasattr(self, "session_cscope"):
-            self.session_cscope.cancel()
+        methods["introduction"] = self.boxer_introduction
+        methods["fight"] = self.boxer_fight
+        methods["punch"] = self.boxer_punch
+        methods["goodbye"] = self.boxer_goodbye
+
+        local_cancel_scope = trio.CancelScope()
+        self.rpc_cscopes.append(local_cancel_scope)
+
+        with trio.CancelScope() as local_cancel_scope:
+            async with ctx.inbound.modify(
+                rpc_request_mod
+                    ) as rpc_queue:
+                while True:
+                    cmd = await rpc_queue.receive()
+
+                    method = cmd["method"]
+                    if method in methods:
+                        self.server.nursery.start_soon(
+                            methods[method],
+                            cmd["params"],
+                            ctx,
+                            cmd["id"]
+                            )
+
+                    else:
+                        await ctx.send_json(
+                            JSONRPCResponseError(
+                                "0",
+                                "protocol error",
+                                cmd["id"]
+                                ).as_json()
+                            )
+
+    async def stop(self):
 
         if hasattr(self, "event_cscope"):
             self.event_cscope.cancel()
 
-    async def send_json(self, obj, encrypted=True, caddr=None):
-        await self.server.debug_file.write(f"sending {obj} to {caddr if caddr is not None else self.main_com}.\n")
-        if encrypted:
-            data = self.box.encrypt(
-                json.dumps(obj)
-                    .encode("utf-8")
+        for lcscope in self.rpc_cscopes:
+            lcscope.cancel()
+
+    def __repr__(self):
+        return repr(self.main_ctx)
+
+    # boxer protocol method implementations
+
+    async def boxer_introduction(self, params, ctx, id):
+
+        # validate params & load node info
+        if "name" not in params:
+            await ctx.send_json(
+                JSONRPCResponseError(
+                    "0",
+                    "protocol error",
+                    id
+                    ).as_json()
                 )
-        else:
-            data = json.dumps(obj).encode("utf-8")
-
-        await self.server.asock.sendto(
-            data,
-            caddr if caddr is not None else self.main_com
-            )
-
-    async def rpc(self, method, params, encrypted=True):
-        pid = self.pcktidmngr.getid()
-
-        async with self.inbound.subscribe(
-            attempt_decrypt_match_id,
-            args=[pid, self.box]
-                ) as sub_queue:
-
-            await self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "method": method,
-                    "params": params,
-                    "id": pid
-                    }
-                )
-
-            enc_resp, addr = await sub_queue.receive()
-            return json.loads(
-                self.box.decrypt(enc_resp)
-                    .decode("utf-8")
-                )
-
-    async def event_consumer(self):
-        await self.server.debug_file.write(f"started event consumer for {self.main_com}.\n")
-        with trio.CancelScope() as self.event_cscope:
-            while True:
-                event = await self.event_queue.receive()
-
-                await self.send_json(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "event",
-                        "params": event,
-                        "id": self.pcktidmngr.getid()
-                        }
-                    )
-
-    async def session_consumer(self):
-
-        # next msg should be encrypted introduction
-        enc_msg, addr = await self.inbound.receive()
-        self.main_com = addr
-        msg = json.loads(
-            self.box.decrypt(enc_msg)
-                .decode("utf-8")
-            )
-
-        await self.server.debug_file.write(f"{msg} from {addr}.\n")
-
-        assert "jsonrpc" in msg
-        assert "method" in msg
-        assert "params" in msg
-        assert "id" in msg
-
-        params = msg["params"]
-
-        assert msg["method"] == "introduction"
-
-        assert "name" in params
+            return
 
         self.name = params["name"]
 
         if "desc" in params:
             self.desc = params["desc"]
 
-        if "secret" in params:
-            assert params["secret"] is {}
-            self.secret = True
+        self.secret = "secret" in params
 
-        await self.send_json(
-            {
-                "jsonrpc": "2.0",
-                "result": "ok",
-                "id": msg["id"]
-                }
+        # respond
+        await ctx.send_json(
+            JSONRPCResponseResult(
+                "ok",
+                id
+                ).as_json()
             )
 
+        # if not secret broadcast node introduction event
         if not self.secret:
             event_params = {
                 "type": "introduction",
@@ -199,8 +140,6 @@ class BoxerRemoteNode:
                 self
                 )
 
-            print(f"new node introduced: {bytes(self.key).hex()}")
-
         # send node directory as introduction events
         nodes = [
             item for item in self.server.nodes.items()
@@ -209,6 +148,7 @@ class BoxerRemoteNode:
         for nkey, node in nodes:
 
             # check if node has been introduced
+            # TODO: if this happens the server should send the intro later
             if not hasattr(node, "name"):
                 continue
 
@@ -222,67 +162,12 @@ class BoxerRemoteNode:
 
             await self.event_queue.send(event_params)
 
+        # finally begin sending events to new node
         self.server.nursery.start_soon(
             self.event_consumer
             )
 
-        with trio.CancelScope() as self.session_cscope:
-
-            while True:
-
-                enc_msg, addr = await self.inbound.receive()
-
-                msg = json.loads(
-                    self.box.decrypt(enc_msg)
-                        .decode("utf-8")
-                    )
-
-                await self.server.debug_file.write(f"{msg} from {addr}.\n")
-
-                assert "jsonrpc" in msg
-                assert "method" in msg
-                assert "params" in msg
-                assert "id" in msg
-
-                method = msg["method"]
-                params = msg["params"]
-                id = msg["id"]
-
-                if method in self.methods:
-                    self.server.nursery.start_soon(
-                        self.methods[method],
-                        params,
-                        addr,
-                        id
-                        )
-                else:
-                    self.server.nursery.start_soon(
-                        self.send_json,
-                        {
-                            "jsonrpc": "2.0",
-                            "error": {
-                                "code": "0",
-                                "message": "protocol error"
-                            },
-                            "id": id
-                            }
-                        )
-
-    # boxer methods
-
-    async def boxer_goodbye(self, params, address, id):
-
-        # clean up opened entry points
-        cleanup_addrs = [
-            addr for addr, key in self.server.addr_key_table.items()
-            if key == bytes(self.key).hex()
-            ]
-        for addr in cleanup_addrs:
-            self.server.unregister_addr(addr)
-
-        self.stop()
-
-        del self.server.nodes[self.key]
+    async def boxer_goodbye(self, params, ctx, id):
 
         if not self.secret:
             await self.server.broadcast(
@@ -293,30 +178,39 @@ class BoxerRemoteNode:
                 self
                 )
 
-        await self.send_json(
-            {
-                "jsonrpc": "2.0",
-                "result": "goodbye",
-                "id": id
-                }
+        del self.server.nodes[self.key]
+
+        await ctx.send_json(
+            JSONRPCResponseResult(
+                "goodbye",
+                id
+                ).as_json()
             )
 
-    async def boxer_fight(self, params, address, id):
+        await self.stop()
 
-        assert "target" in params
+    async def boxer_fight(self, params, ctx, id):
+
+        # validate params
+        if "target" not in params:
+            await ctx.send_json(
+                JSONRPCResponseError(
+                    "0",
+                    "protocol error",
+                    id
+                    ).as_json()
+                )
+            return
 
         tkey = PublicKey(bytes.fromhex(params["target"]))
 
         if tkey not in self.server.nodes:
-            await self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": "1",
-                        "message": "node not found"
-                    },
-                    "id": id
-                    }
+            await ctx.send_json(
+                JSONRPCResponseError(
+                    "1",
+                    "node not found",
+                    id
+                    ).as_json()
                 )
 
         else:
@@ -324,80 +218,78 @@ class BoxerRemoteNode:
             target_node = self.server.nodes[tkey]
 
             fid = self.server.fightidmngr.getid()
+            self.server.fights[fid] = {
+                "ctxs": []
+                }
 
-            resp = await target_node.rpc(
+            # send fight req to target node
+            resp = await target_node.main_ctx.rpc(
                 "fight",
                 {
                     "with": bytes(self.key).hex(),
                     "fid": fid
-                    }
+                    },
+                target_node.pcktidmngr.getid()
                 )
 
             result = resp["result"]
             if result == "take":
-                self.server.fights[fid] = {
-                    "a": bytes(self.key).hex(),
-                    "b": tkey,
-                    "addrs": []
-                    }
                 result = fid
+            else:
+                del self.server.fights[fid]
 
-            await self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "result": result,
-                    "id": id
-                    }
+            await ctx.send_json(
+                JSONRPCResponseResult(
+                    result,
+                    id
+                    ).as_json()
                 )
 
-    async def boxer_punch(self, params, address, id):
+    async def boxer_punch(self, params, ctx, id):
 
-        assert "fid" in params
+        if "fid" not in params:
+            await ctx.send_json(
+                JSONRPCResponseError(
+                    "0",
+                    "protocol error",
+                    id
+                    ).as_json()
+                )
+            return
 
+        # add context to fight dict
         fid = params["fid"]
         fight = self.server.fights[fid]
-        fight["addrs"].append(
-            (bytes(self.key).hex(), address)
-            )
+        fight["ctxs"].append((ctx, id))
 
-        if len(fight["addrs"]) == 2:
-            node0_pkey, node0_naddr = fight["addrs"][0]
-            node0 = self.server.nodes[PublicKey(bytes.fromhex(node0_pkey))]
-            node1_pkey, node1_naddr = fight["addrs"][1]
-            node1 = self.server.nodes[PublicKey(bytes.fromhex(node1_pkey))]
+        # if this node is  the last one to  punch, begin udp  external endpoint
+        # exchange
+        if len(fight["ctxs"]) == 2:
+            node0_ctx, node0_pid = fight["ctxs"][0]
+            node0 = self.server.nodes[node0_ctx.remote_pkey]
+            node1_ctx, node1_pid = fight["ctxs"][1]
+            node1 = self.server.nodes[node1_ctx.remote_pkey]
 
             self.server.nursery.start_soon(
-                self.server.asock.sendto,
-                node0.box.encrypt(
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "result": {
-                                "host": node1_naddr[0],
-                                "port": node1_naddr[1]
-                                },
-                            "id": node0.pcktidmngr.getid()
-                            }
-                        ).encode("utf-8")
-                    ),
-                node0_naddr
+                node0_ctx.send_json,
+                JSONRPCResponseResult(
+                    {
+                        "host": node1_ctx.addr[0],
+                        "port": node1_ctx.addr[1]
+                        },
+                    node0_pid
+                    ).as_json()
                 )
 
             self.server.nursery.start_soon(
-                self.server.asock.sendto,
-                node1.box.encrypt(
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "result": {
-                                "host": node0_naddr[0],
-                                "port": node0_naddr[1]
-                                },
-                            "id": node1.pcktidmngr.getid()
-                            }
-                        ).encode("utf-8")
-                    ),
-                node1_naddr
+                node1_ctx.send_json,
+                JSONRPCResponseResult(
+                    {
+                        "host": node0_ctx.addr[0],
+                        "port": node0_ctx.addr[1]
+                        },
+                    node1_pid
+                    ).as_json()
                 )
 
 
@@ -418,112 +310,73 @@ class BoxerServer:
         self.port = port
 
         self.key = PrivateKey.generate()
-        self.asock = trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.nodes = {}
-        self.addr_key_table = {}
+        self.gate = UDPGate(
+            nursery,
+            key=self.key
+            )
 
+        self.nodes = {}
         self.fights = {}
         self.fightidmngr = SessionIDManager()
 
-    async def init(self):
+    async def init(
+        self,
+        log_path="boxer.log"
+            ):
 
-        self.debug_file = await trio.open_file("bs_debug", "w")
+        self.log_file = await trio.open_file(log_path, "w")
 
-        print(f"boxer server v{BoxerServer.BOX_VERSION} init...")
-        print(f"{bytes(self.key.public_key).hex()}")
-
-        await self.asock.bind((self.host, self.port))
-
-        print(f"socket binded on {self.host}:{self.port}")
-
-        self.nursery.start_soon(
-            self.inbound_generator
+        await self.gate.bind(
+            (self.host, self.port),
+            self.new_connection
             )
 
-    def stop(self):
-        print("stopping boxer server...")
-        for key, node in self.nodes.items():
-            node.stop()
-        print("boxer server stopped")
+    async def stop(self):
+        for node in self.nodes.values():
+            await node.stop()
 
-    def register_new_addr(self, addr, key):
-        self.addr_key_table[addr_has_str(addr)] = key
+        if hasattr(self, "log_file"):
+            await self.log_file.aclose()
 
-    def unregister_addr(self, addr):
-        if not isinstance(addr, str):
-            addr = addr_has_str(addr)
-        del self.addr_key_table[addr]
+    async def new_connection(self, ctx):
 
-    async def _bg_key_exchange(self, data, address):
+        await ctx.wait_keyex()
 
-        msg = json.loads(data.decode("utf-8"))
-
-        await self.debug_file.write(f"{msg} from {address}.\n")
-
-        assert "jsonrpc" in msg
-        assert "method" in msg
-        assert "params" in msg
-        assert "id" in msg
-
-        assert msg["jsonrpc"] == "2.0"
-        assert msg["method"] == "key-ex"
-        assert "pkey" in msg["params"]
-
-        nkey = msg["params"]["pkey"]
-
-        nkey = PublicKey(bytes.fromhex(nkey))
-
-        self.register_new_addr(address, nkey)
-
-        if nkey not in self.nodes:
-            self.nodes[nkey] = BoxerRemoteNode(
-                nkey,
+        if ctx.key not in self.nodes:
+            self.nodes[ctx.remote_pkey] = BoxerRemoteNode(
+                ctx.remote_pkey,
                 self
                 )
-            self.nodes[nkey].start()
 
-        await self.nodes[nkey].send_json(
-            {
-                "jsonrpc": "2.0",
-                "result": bytes(self.key.public_key).hex(),
-                "id": msg["id"]
-                },
-            encrypted=False,
-            caddr=address
+        nnode = self.nodes[ctx.remote_pkey]
+        nnode.main_ctx = ctx
+
+        # begin listening to rpcs in this ctx
+        self.nursery.start_soon(
+            nnode.rpc_request_consumer,
+            ctx
             )
 
-    async def broadcast(self, event, orig):
-        print(f"broadcasting {event['type']}")
-        nodes = [item for item in self.nodes.values() if item != orig]
-        for node in nodes:
+    async def broadcast(self, event, origin_node):
+
+        target_nodes = [
+            node for node in self.nodes.values()
+            if node is not origin_node
+            ]
+
+        for node in target_nodes:
             await node.event_queue.send(event)
 
-    async def inbound_generator(self):
 
-        self.inbound_cscope = trio.CancelScope()
-        with self.inbound_cscope:
+async def start_server():
 
-            while True:
-
-                data, address = await self.asock.recvfrom(
-                    BoxerServer.BOX_MAX_PACKET_LENGTH
-                    )
-
-                if addr_has_str(address) not in self.addr_key_table:
-                    print(f"new addr conected {address}")
-                    self.nursery.start_soon(
-                        self._bg_key_exchange,
-                        data,
-                        address
-                        )
-
-                else:
-
-                    pkey = self.addr_key_table[addr_has_str(address)]
-                    await self.nodes[pkey].inbound.send((data, address))
-
-
-async def main():
+    logging.basicConfig(
+        level=logging.DEBUG,
+        filename='boxer.log',
+        filemode='w',
+        format='%(asctime)s %(message)s',
+        datefmt='%d-%b-%y %H:%M:%S'
+        )
 
     async with trio.open_nursery() as nursery:
 
@@ -534,10 +387,10 @@ async def main():
         try:
             await trio.sleep_forever()
         finally:
-            server.stop()
+            await server.stop()
 
 if __name__ == '__main__':
     try:
-        trio.run(main)
+        trio.run(start_server)
     except KeyboardInterrupt:
         pass
