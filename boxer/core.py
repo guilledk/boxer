@@ -302,14 +302,19 @@ class BoxerServer:
         self,
         nursery,
         host="0.0.0.0",
-        port=12000
+        port=12000,
+        key=None
             ):
 
         self.nursery = nursery
         self.host = host
         self.port = port
 
-        self.key = PrivateKey.generate()
+        if key is None:
+            self.key = PrivateKey.generate()
+        else:
+            self.key = PrivateKey(bytes.fromhex(key))
+
         self.gate = UDPGate(
             nursery,
             key=self.key
@@ -370,6 +375,14 @@ class BoxerServer:
 
 async def start_server():
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-k", "--key", type=str,
+        help=f"set private key"
+        )
+
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.DEBUG,
         filename='boxer.log',
@@ -380,7 +393,10 @@ async def start_server():
 
     async with trio.open_nursery() as nursery:
 
-        server = BoxerServer(nursery)
+        server = BoxerServer(
+            nursery,
+            key=args.key if args.key else None
+            )
 
         await server.init()
 

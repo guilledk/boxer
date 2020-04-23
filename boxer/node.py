@@ -26,14 +26,19 @@ class BoxerNode:
         self,
         server_addr,
         nursery,
+        key=None,
         evade_fights=False
             ):
 
         self.nursery = nursery
         self.evade_fights = evade_fights
 
+        if key is None:
+            self.key = PrivateKey.generate()
+        else:
+            self.key = PrivateKey(bytes.fromhex(key))
+
         self.node_directory = {}
-        self.key = PrivateKey.generate()
         self.pcktidmngr = SessionIDManager()
         self.server_ctx = UDPContext(
             server_addr,
