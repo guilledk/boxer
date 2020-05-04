@@ -384,14 +384,6 @@ async def start_server():
 
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG,
-        filename='boxer.log',
-        filemode='w',
-        format='%(asctime)s %(message)s',
-        datefmt='%d-%b-%y %H:%M:%S'
-        )
-
     async with trio.open_nursery() as nursery:
 
         server = BoxerServer(

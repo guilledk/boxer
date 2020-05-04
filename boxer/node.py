@@ -2,6 +2,7 @@
 
 import trio
 import socket
+import logging
 
 from nacl.public import PrivateKey, PublicKey, Box
 
@@ -18,6 +19,9 @@ from boxer.rpc import (
     JSONRPCResponseError,
     rpc_request_mod
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 class BoxerNode:
@@ -158,10 +162,13 @@ class BoxerNode:
     async def _bg_fight(self, nkey, fid):
 
         # create new udp context with server
+        sock = trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        await sock.bind(('', 0))
+
         fight_ctx = UDPContext(
             self.server_ctx.addr,
             self.key,
-            trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock
             )
         fight_ctx.start_inbound(self.nursery)
         fight_ctx.start_bgkeyex(self.nursery)
@@ -192,19 +199,28 @@ class BoxerNode:
             result["port"]
             )
 
-        # send two punch packets, 3 is the minimun for it to work
-        for x in range(3):
+        punch_amount = 10
+
+        for x in range(punch_amount):
             await fight_ctx.send_raw(b"punch")
 
-        # with a timeout of 5 seconds, await the two remote punches
+        # with a timeout of 5, await the punches
         with trio.move_on_after(5):
+
             punched_trough = False
 
             async with fight_ctx.inbound.subscribe(
-                lambda *args: args[0] == b"punch"
+                lambda *args: args[0] == b"punch",
+                history=True
                     ) as punch_queue:
-                await punch_queue.receive()
+                i = 0
+                while i < punch_amount:
+                    msg = await punch_queue.receive()
+                    logger.debug("got punched!")
+                    i += 1
                 punched_trough = True
+
+        # TODO: raise error if cant punch through
 
         if punched_trough:
             await self.fights.send((fid, fight_ctx))

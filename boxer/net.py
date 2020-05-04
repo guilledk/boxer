@@ -130,12 +130,14 @@ class UDPContext:
 
     # for inbound self-generation, drops all data not from self.addr
     async def inbound_generator(self):
+        logger.debug(f"starting inbound from {self.addr}")
         with trio.CancelScope() as self.inbound_cscope:
             while True:
 
                 data, addr = await self.sock.recvfrom(PACKET_LENGTH)
 
                 if self.addr != addr:
+                    logger.debug(f"dropping packet {data} from {addr}")
                     continue
 
                 if hasattr(self, "box"):
