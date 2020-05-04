@@ -2,6 +2,7 @@
 
 import trio
 import logging
+import argparse
 
 from nacl.public import PublicKey, PrivateKey, Box
 

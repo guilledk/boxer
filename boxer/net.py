@@ -14,6 +14,9 @@ from triopatterns import AsyncQueue
 from boxer.rpc import rpc_response_mod
 
 
+logger = logging.getLogger(__name__)
+
+
 PACKET_LENGTH = 16 * 1024  # 16kb
 
 
@@ -42,7 +45,7 @@ class UDPContext:
 
     async def send_raw(self, data, encrypted=True):
 
-        logging.debug(f"outbound to {self.addr}: {data}")
+        logger.debug(f"outbound to {self.addr}: {data}")
 
         if hasattr(self, "box") and encrypted:
             data = self.box.encrypt(data)
@@ -138,7 +141,7 @@ class UDPContext:
                 if hasattr(self, "box"):
                     data = self.box.decrypt(data)
 
-                logging.debug(f"inbound from {addr}: {data}")
+                logger.debug(f"inbound from {addr}: {data}")
 
                 await self.inbound.send(data)
 
@@ -191,7 +194,7 @@ class UDPGate:
             ):
         await self.sock.bind(addr)
 
-        logging.debug(f"bind to {addr}")
+        logger.debug(f"bind to {addr}")
 
         self.conn_cb = conn_cb
         self.nursery.start_soon(
@@ -224,7 +227,7 @@ class UDPGate:
                     if hasattr(udpctx, "box"):
                         data = udpctx.box.decrypt(data)
 
-                logging.debug(f"inbound from {addr}: {data}")
+                logger.debug(f"inbound from {addr}: {data}")
 
                 await udpctx.inbound.send(data)
 
