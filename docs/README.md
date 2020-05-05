@@ -6,7 +6,7 @@
 - Public Key based peer directory, with service descriptions
 - Ed25519 encrypted
 - `jsonrpc 2.0`
-- Fully async (trio v0.13)
+- Fully async (trio v0.14)
 - Python 3
 
 #### Dependencies

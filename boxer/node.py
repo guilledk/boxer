@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
 import trio
+import math
 import socket
 import logging
+
+from datetime import datetime
 
 from nacl.public import PrivateKey, PublicKey, Box
 
@@ -22,6 +25,10 @@ from boxer.rpc import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class PunchTimeoutError(Exception):
+    pass
 
 
 class BoxerNode:
@@ -200,30 +207,43 @@ class BoxerNode:
             )
 
         punch_amount = 10
+        punch_packet = b"punch"
+        punched_trough = False
 
-        for x in range(punch_amount):
-            await fight_ctx.send_raw(b"punch")
+        def digits(n):
+            if n > 0:
+                return int(math.log10(n)) + 1
+            elif n == 0:
+                return 1
+            else:
+                # n must be > 0
+                raise AssertionError
 
-        # with a timeout of 5, await the punches
-        with trio.move_on_after(5):
-
-            punched_trough = False
-
-            async with fight_ctx.inbound.subscribe(
-                lambda *args: args[0] == b"punch",
+        async with fight_ctx.inbound.subscribe(
+                lambda *args: args[0] == punch_packet,
                 history=True
                     ) as punch_queue:
-                i = 0
-                while i < punch_amount:
-                    msg = await punch_queue.receive()
-                    logger.debug("got punched!")
-                    i += 1
-                punched_trough = True
 
-        # TODO: raise error if cant punch through
+            # hopefully both clients syncronize to send their packets
+            # try to sleep until next second
+            tstamp = datetime.now().microsecond
+            await trio.sleep(
+                # now x 10^(-1 * digits(now))
+                1 - (tstamp * math.pow(10, -digits(tstamp)))
+                )
+
+            for x in range(punch_amount):
+                await fight_ctx.send_raw(punch_packet)
+
+            msg = await punch_queue.receive()
+            logger.debug("got punched!")
+            punched_trough = True
 
         if punched_trough:
             await self.fights.send((fid, fight_ctx))
+            logger.debug(f"punched through!")
+        else:
+            raise PunchTimeoutError
 
     async def fight(self, pkey):
         resp = await self.server_ctx.rpc(
@@ -257,12 +277,10 @@ class BoxerNode:
 
     async def goodbye(self):
 
-        resp = await self.server_ctx.rpc(
-            "goodbye", {}, self.pcktidmngr.getid()
-            )
-
-        if resp["result"] != "goodbye":
-            raise ServerResponseError(f"server returned error: {resp}")
+        with trio.move_on_after(4):
+            resp = await self.server_ctx.rpc(
+                "goodbye", {}, self.pcktidmngr.getid()
+                )
 
         if hasattr(self, "rpc_cscope"):
             self.rpc_cscope.cancel()
