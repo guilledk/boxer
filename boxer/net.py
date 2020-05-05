@@ -70,24 +70,38 @@ class UDPContext:
     # rpc assumes obj as "id" field and creates a subscriber queue to match the
     # response  message that  should contain the  same unique  "id" field, then
     # returns response.
-    async def rpc(self, method, params, id, encrypted=True):
+    async def rpc(
+        self,
+        method,
+        params,
+        id,
+        encrypted=True,
+        timeout=0.6
+            ):
+
         async with self.inbound.modify(
             rpc_response_mod,
             args=[id],
             history=False
                 ) as resp_queue:
 
-            await self.send_json(
-                {
-                    "jsonrpc": "2.0",
-                    "method": method,
-                    "params": params,
-                    "id": id
-                    },
-                encrypted=encrypted
-                )
+            msg = None
+            while msg is None:
+                with trio.move_on_after(timeout):
+                    await self.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": method,
+                            "params": params,
+                            "id": id
+                            },
+                        encrypted=encrypted
+                        )
 
-            msg = await resp_queue.receive()
+                    msg = await resp_queue.receive()
+
+                if msg is None:
+                    logger.warning(f"rpc timeout {id}.")
 
             return msg
 
@@ -137,7 +151,7 @@ class UDPContext:
                 data, addr = await self.sock.recvfrom(PACKET_LENGTH)
 
                 if self.addr != addr:
-                    logger.debug(f"dropping packet {data} from {addr}")
+                    logger.debug(f"dropping packet {data} from {addr}, im listening for {self.addr}")
                     continue
 
                 if hasattr(self, "box"):

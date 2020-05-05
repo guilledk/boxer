@@ -206,7 +206,7 @@ class BoxerNode:
             result["port"]
             )
 
-        punch_amount = 10
+        punch_amount = 100
         punch_packet = b"punch"
         punched_trough = False
 
@@ -227,17 +227,21 @@ class BoxerNode:
             # hopefully both clients syncronize to send their packets
             # try to sleep until next second
             tstamp = datetime.now().microsecond
+
+            # now x 10^(-1 * digits(now))
+            delta = 1 - (tstamp * math.pow(10, -digits(tstamp)))
+
             await trio.sleep(
-                # now x 10^(-1 * digits(now))
-                1 - (tstamp * math.pow(10, -digits(tstamp)))
+                delta if delta >= 0.3 else delta + 1
                 )
 
             for x in range(punch_amount):
                 await fight_ctx.send_raw(punch_packet)
 
-            msg = await punch_queue.receive()
-            logger.debug("got punched!")
-            punched_trough = True
+            with trio.move_on_after(5):
+                msg = await punch_queue.receive()
+                logger.debug("got punched!")
+                punched_trough = True
 
         if punched_trough:
             await self.fights.send((fid, fight_ctx))

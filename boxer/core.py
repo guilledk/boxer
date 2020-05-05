@@ -22,11 +22,12 @@ class BoxerRemoteNode:
 
     def __init__(
         self,
-        key,
+        ctx,
         server
             ):
 
-        self.key = key
+        self.main_ctx = ctx
+        self.key = ctx.remote_pkey
         self.server = server
 
         self.box = Box(self.server.key, self.key)
@@ -348,18 +349,15 @@ class BoxerServer:
 
         await ctx.wait_keyex()
 
-        if ctx.key not in self.nodes:
+        if ctx.remote_pkey not in self.nodes:
             self.nodes[ctx.remote_pkey] = BoxerRemoteNode(
-                ctx.remote_pkey,
+                ctx,
                 self
                 )
 
-        nnode = self.nodes[ctx.remote_pkey]
-        nnode.main_ctx = ctx
-
         # begin listening to rpcs in this ctx
         self.nursery.start_soon(
-            nnode.rpc_request_consumer,
+            self.nodes[ctx.remote_pkey].rpc_request_consumer,
             ctx
             )
 
