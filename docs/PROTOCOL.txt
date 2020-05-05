@@ -22,20 +22,7 @@ generic protocol error:
 key-ex:
 -------
 
-{
-    "jsonrpc": "2.0",
-    "method": "key-ex",
-    "params": {
-        "pkey": "{hex encoded ed25519 public key}"
-    }
-    "id": "{unique for this session}"
-}
-ret:
-{
-    "jsonrpc": "2.0",
-    "result": "{boxer server ed25519 public key}",
-    "id": "{uid}"
-}
+first 32 bytes of every connection are the ed25519 public keys of each participant.
 
 introduction:
 -------------
