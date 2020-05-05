@@ -148,7 +148,7 @@ class BoxerNode:
 
         await self.events.send(params)
 
-    async def remote_fight(self, params, id):
+    async def remote_fight(self, params, pid):
         if self.evade_fights:
             result = "evade"
         else:
@@ -162,20 +162,23 @@ class BoxerNode:
         await self.server_ctx.send_json(
             JSONRPCResponseResult(
                 result,
-                id
+                pid
                 ).as_json()
             )
 
-    async def _bg_fight(self, nkey, fid):
+    async def _bg_fight(
+        self,
+        nkey,
+        fid,
+        punch_amount=30
+            ):
 
         # create new udp context with server
-        sock = trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        await sock.bind(('', 0))
 
         fight_ctx = UDPContext(
             self.server_ctx.addr,
             self.key,
-            sock
+            trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             )
         fight_ctx.start_inbound(self.nursery)
         fight_ctx.start_bgkeyex(self.nursery)
@@ -206,7 +209,6 @@ class BoxerNode:
             result["port"]
             )
 
-        punch_amount = 100
         punch_packet = b"punch"
         punched_trough = False
 
@@ -220,7 +222,7 @@ class BoxerNode:
                 raise AssertionError
 
         async with fight_ctx.inbound.subscribe(
-                lambda *args: args[0] == punch_packet,
+                lambda *args: isinstance(args[0], bytes),
                 history=True
                     ) as punch_queue:
 
@@ -245,39 +247,46 @@ class BoxerNode:
 
         if punched_trough:
             await self.fights.send((fid, fight_ctx))
-            logger.debug(f"punched through!")
+            logger.info(f"punched through!")
         else:
-            raise PunchTimeoutError
+            await self.fights.send((fid, None))
+            logger.warning(f"didn't punch through!")
 
-    async def fight(self, pkey):
-        resp = await self.server_ctx.rpc(
-            "fight",
-            {
-                "target": pkey
-                },
-            self.pcktidmngr.getid()
-            )
+    async def fight(self, pkey, scope=None):
+        if scope is None:
+            scope = trio.CancelScope()
 
-        if resp["result"] == "evade":
-            return None
+        with scope:
+            while True:
+                resp = await self.server_ctx.rpc(
+                    "fight",
+                    {
+                        "target": pkey
+                        },
+                    self.pcktidmngr.getid()
+                    )
 
-        fid = resp["result"]
+                if resp["result"] == "evade":
+                    return None
 
-        async with self.fights.subscribe(
-            lambda *args: args[0][0] == args[1],
-            args=[fid],
-            history=False
-                ) as fight_queue:
+                fid = resp["result"]
 
-            self.nursery.start_soon(
-                self._bg_fight,
-                pkey,
-                fid
-                )
+                async with self.fights.subscribe(
+                    lambda *args: args[0][0] == args[1],
+                    args=[fid],
+                    history=False
+                        ) as fight_queue:
 
-            fid, fight_ctx = await fight_queue.receive()
+                    self.nursery.start_soon(
+                        self._bg_fight,
+                        pkey,
+                        fid
+                        )
 
-            return fight_ctx
+                    fid, fight_ctx = await fight_queue.receive()
+
+                    if fight_ctx is not None:
+                        return fight_ctx
 
     async def goodbye(self):
 
