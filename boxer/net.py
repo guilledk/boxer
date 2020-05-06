@@ -36,35 +36,49 @@ class UDPContext:
         key,
         sock
             ):
-
-        self.addr = addr
         self.key = key
         self.sock = sock
 
         self.inbound = AsyncQueue()
 
-    async def send_raw(self, data, encrypted=True):
+        self.addr_whitelist = []
+        self.boxes = {}
 
-        logger.debug(f"outbound to {self.addr}: {data}")
+        self.set_addr(addr, None)
 
-        if hasattr(self, "box") and encrypted:
-            data = self.box.encrypt(data)
+    def set_addr(self, new_addr, new_box):
+        self.addr = new_addr
+        self.boxes[new_addr] = new_box
+        self.addr_whitelist.append(new_addr)
+
+    async def send_raw(self, data, encrypted=True, dest=None):
+
+        if dest is None:
+            dest = self.addr
+
+        raw_data = data
+        if encrypted and dest in self.boxes:
+            data = self.boxes[dest].encrypt(data)
 
         await self.sock.sendto(
             data,
-            self.addr
+            dest
             )
 
-    async def send_str(self, string, encrypted=True):
+        logger.debug(f"sent to {dest}: {raw_data}")
+
+    async def send_str(self, string, encrypted=True, dest=None):
         await self.send_raw(
             string.encode("utf-8"),
-            encrypted=encrypted
+            encrypted=encrypted,
+            dest=dest
             )
 
-    async def send_json(self, obj, encrypted=True):
+    async def send_json(self, obj, encrypted=True, dest=None):
         await self.send_str(
             json.dumps(obj),
-            encrypted=encrypted
+            encrypted=encrypted,
+            dest=dest
             )
 
     # rpc assumes obj as "id" field and creates a subscriber queue to match the
@@ -74,15 +88,16 @@ class UDPContext:
         self,
         method,
         params,
-        id,
+        pid,
         encrypted=True,
-        timeout=0.6
+        timeout=5,
+        dest=None,
+        box=None
             ):
 
         async with self.inbound.modify(
             rpc_response_mod,
-            args=[id],
-            history=False
+            args=[pid]
                 ) as resp_queue:
 
             msg = None
@@ -93,15 +108,16 @@ class UDPContext:
                             "jsonrpc": "2.0",
                             "method": method,
                             "params": params,
-                            "id": id
+                            "id": pid
                             },
-                        encrypted=encrypted
+                        encrypted=encrypted,
+                        dest=dest
                         )
 
                     msg = await resp_queue.receive()
 
                 if msg is None:
-                    logger.warning(f"rpc timeout {id}.")
+                    logger.warning(f"rpc timeout {pid}.")
 
             return msg
 
@@ -123,7 +139,7 @@ class UDPContext:
             data = await pkqueue.receive()
 
         self.remote_pkey = PublicKey(data)
-        self.box = Box(self.key, self.remote_pkey)
+        self.boxes[self.addr] = Box(self.key, self.remote_pkey)
 
         await self.inbound.send(UDPContext.F_KEYEX)
 
@@ -150,12 +166,12 @@ class UDPContext:
 
                 data, addr = await self.sock.recvfrom(PACKET_LENGTH)
 
-                if self.addr != addr:
-                    logger.debug(f"dropping packet {data} from {addr}, im listening for {self.addr}")
+                if addr not in self.addr_whitelist:
+                    logger.debug(f"dropping packet {data} from {addr}. not in whitelist")
                     continue
 
-                if hasattr(self, "box"):
-                    data = self.box.decrypt(data)
+                if self.boxes[addr] is not None:
+                    data = self.boxes[addr].decrypt(data)
 
                 logger.debug(f"inbound from {addr}: {data}")
 
@@ -240,8 +256,8 @@ class UDPGate:
                         )
                 else:
                     udpctx = self.contexts[addr]
-                    if hasattr(udpctx, "box"):
-                        data = udpctx.box.decrypt(data)
+                    if udpctx.boxes[addr] is not None:
+                        data = udpctx.boxes[addr].decrypt(data)
 
                 logger.debug(f"inbound from {addr}: {data}")
 

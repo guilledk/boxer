@@ -18,6 +18,31 @@ from boxer.rpc import (
     )
 
 
+class BoxerFight:
+
+    STATUS_FIGHT = "fight"
+    STATUS_KO = "ko"
+    STATUS_TIMEOUT = "timeout"
+
+    def __init__(self, fid):
+        self.fid = fid
+        self.round = 1
+
+        self.ctxts = {}
+        self.status = {}
+        self.pids = {}
+
+    def addctx(self, ctx, punch_id):
+
+        self.ctxts[ctx] = ctx
+        self.status[ctx] = BoxerFight.STATUS_FIGHT
+
+        self.pids[ctx] = {
+            "punch_id": punch_id,
+            "round_id": -1
+        }
+
+
 class BoxerRemoteNode:
 
     def __init__(
@@ -56,6 +81,7 @@ class BoxerRemoteNode:
         methods["introduction"] = self.boxer_introduction
         methods["fight"] = self.boxer_fight
         methods["punch"] = self.boxer_punch
+        methods["round"] = self.boxer_round
         methods["goodbye"] = self.boxer_goodbye
 
         local_cancel_scope = trio.CancelScope()
@@ -219,26 +245,25 @@ class BoxerRemoteNode:
 
             target_node = self.server.nodes[tkey]
 
-            fid = self.server.fightidmngr.getid()
-            self.server.fights[fid] = {
-                "ctxs": []
-                }
+            fight = BoxerFight(self.server.fightidmngr.getid())
+
+            self.server.fights[fight.fid] = fight
 
             # send fight req to target node
             resp = await target_node.main_ctx.rpc(
                 "fight",
                 {
                     "with": bytes(self.key).hex(),
-                    "fid": fid
+                    "fid": fight.fid
                     },
                 target_node.pcktidmngr.getid()
                 )
 
             result = resp["result"]
             if result == "take":
-                result = fid
+                result = fight.fid
             else:
-                del self.server.fights[fid]
+                del self.server.fights[fight.fid]
 
             await ctx.send_json(
                 JSONRPCResponseResult(
@@ -262,37 +287,91 @@ class BoxerRemoteNode:
         # add context to fight dict
         fid = params["fid"]
         fight = self.server.fights[fid]
-        fight["ctxs"].append((ctx, id))
+        fight.addctx(ctx, id)
 
         # if this node is  the last one to  punch, begin udp  external endpoint
         # exchange
-        if len(fight["ctxs"]) == 2:
-            node0_ctx, node0_pid = fight["ctxs"][0]
-            node0 = self.server.nodes[node0_ctx.remote_pkey]
-            node1_ctx, node1_pid = fight["ctxs"][1]
-            node1 = self.server.nodes[node1_ctx.remote_pkey]
+        if len(fight.ctxts) == 2:
+            other_ctx = [c for c in fight.ctxts if c != ctx][0]
 
             self.server.nursery.start_soon(
-                node0_ctx.send_json,
+                ctx.send_json,
                 JSONRPCResponseResult(
                     {
-                        "host": node1_ctx.addr[0],
-                        "port": node1_ctx.addr[1]
+                        "host": other_ctx.addr[0],
+                        "port": other_ctx.addr[1]
                         },
-                    node0_pid
+                    fight.pids[ctx]["punch_id"]
                     ).as_json()
                 )
 
             self.server.nursery.start_soon(
-                node1_ctx.send_json,
+                other_ctx.send_json,
                 JSONRPCResponseResult(
                     {
-                        "host": node0_ctx.addr[0],
-                        "port": node0_ctx.addr[1]
+                        "host": ctx.addr[0],
+                        "port": ctx.addr[1]
                         },
-                    node1_pid
+                    fight.pids[other_ctx]["punch_id"]
                     ).as_json()
                 )
+
+    async def boxer_round(self, params, ctx, id):
+
+        if "fid" not in params or \
+                "result" not in params:
+            await ctx.send_json(
+                JSONRPCResponseError(
+                    "0",
+                    "protocol error",
+                    id
+                    ).as_json()
+                )
+            return
+
+        fid = params["fid"]
+        result = params["result"]
+
+        fight = self.server.fights[fid]
+
+        fight.pids[ctx]["round_id"] = id
+        fight.status[ctx] = result
+
+        # if round is finished
+        if BoxerFight.STATUS_FIGHT not in fight.status.values():
+
+            ret = ""
+
+            done = True
+            for val in fight.status.values():
+                done &= val == BoxerFight.STATUS_KO
+
+            if done:
+                ret = "done"
+                del self.server.fights[fight.fid]
+
+            elif fight.round > self.server.max_rounds:
+                ret = "fail"
+                del self.server.fights[fight.fid]
+
+            else:
+                ret = "retry"
+                for c in fight.status:
+                    fight.status[c] = BoxerFight.STATUS_FIGHT
+
+                fight.round += 1
+
+            i = 0
+            for node_ctx in fight.ctxts:
+
+                self.server.nursery.start_soon(
+                    node_ctx.send_json,
+                    JSONRPCResponseResult(
+                        ret,
+                        fight.pids[node_ctx]["round_id"]
+                        ).as_json()
+                    )
+                i += 1
 
 
 class BoxerServer:
@@ -305,12 +384,14 @@ class BoxerServer:
         nursery,
         host="0.0.0.0",
         port=12000,
-        key=None
+        key=None,
+        max_rounds=5
             ):
 
         self.nursery = nursery
         self.host = host
         self.port = port
+        self.max_rounds = max_rounds
 
         if key is None:
             self.key = PrivateKey.generate()
@@ -379,6 +460,10 @@ async def start_server():
         "-k", "--key", type=str,
         help=f"set private key"
         )
+    parser.add_argument(
+        "-r", "--rounds", type=int,
+        help=f"set max rounds"
+        )
 
     args = parser.parse_args()
 
@@ -386,7 +471,8 @@ async def start_server():
 
         server = BoxerServer(
             nursery,
-            key=args.key if args.key else None
+            key=args.key if args.key else None,
+            max_rounds=args.rounds if args.rounds else 5
             )
 
         await server.init()

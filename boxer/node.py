@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import trio
 import math
 import socket
@@ -11,7 +12,7 @@ from nacl.public import PrivateKey, PublicKey, Box
 
 from triopatterns import AsyncQueue, SessionIDManager
 
-from boxer.core import BoxerServer
+from boxer.core import BoxerServer, BoxerFight
 
 from boxer.net import UDPContext
 
@@ -169,8 +170,7 @@ class BoxerNode:
     async def _bg_fight(
         self,
         nkey,
-        fid,
-        punch_amount=30
+        fid
             ):
 
         # create new udp context with server
@@ -189,7 +189,8 @@ class BoxerNode:
             {
                 "fid": fid
                 },
-            self.pcktidmngr.getid()
+            self.pcktidmngr.getid(),
+            timeout=10
             )
 
         if "result" not in resp:
@@ -199,18 +200,22 @@ class BoxerNode:
 
         # change udp context encryption to use peer pkey
         fight_ctx.remote_pkey = PublicKey(bytes.fromhex(nkey))
-        fight_ctx.box = Box(
-            fight_ctx.key,
-            fight_ctx.remote_pkey
-            )
+
         # also point to peer external endpoint
-        fight_ctx.addr = (
-            result["host"],
-            result["port"]
+        fight_ctx.set_addr(
+            (result["host"], result["port"]),
+            Box(
+                fight_ctx.key,
+                fight_ctx.remote_pkey
+                )
             )
 
+        punch_total_len = 256
         punch_packet = b"punch"
+        punch_garbage_len = punch_total_len - 1 - len(punch_packet)
         punched_trough = False
+
+        fight_ended = False
 
         def digits(n):
             if n > 0:
@@ -221,36 +226,64 @@ class BoxerNode:
                 # n must be > 0
                 raise AssertionError
 
-        async with fight_ctx.inbound.subscribe(
-                lambda *args: isinstance(args[0], bytes),
-                history=True
-                    ) as punch_queue:
+        while not fight_ended:
 
-            # hopefully both clients syncronize to send their packets
-            # try to sleep until next second
-            tstamp = datetime.now().microsecond
+            async with fight_ctx.inbound.subscribe(
+                    lambda *args: isinstance(args[0], bytes) and
+                    (punch_packet in args[0]),
+                    history=True
+                        ) as punch_queue:
 
-            # now x 10^(-1 * digits(now))
-            delta = 1 - (tstamp * math.pow(10, -digits(tstamp)))
+                attack_scope = trio.CancelScope()
 
-            await trio.sleep(
-                delta if delta >= 0.3 else delta + 1
+                async def attack():
+                    # hopefully both clients syncronize to send their packets
+                    # try to sleep until next second
+                    # now x 10^(-1 * digits(now))
+                    tstamp = datetime.now().microsecond
+                    await trio.sleep(1 - (tstamp * math.pow(10, -digits(tstamp))))
+
+                    with attack_scope:
+                        with trio.move_on_after(1):
+                            while True:
+                                await fight_ctx.send_raw(
+                                    punch_packet +
+                                    b'=' +
+                                    os.urandom(punch_garbage_len)
+                                    )
+
+                self.nursery.start_soon(attack)
+
+                with trio.move_on_after(2.6):
+                    msg = await punch_queue.receive()
+                    logger.debug("got punched!")
+                    punched_trough = True
+                    attack_scope.cancel()
+
+            resp = await fight_ctx.rpc(
+                "round",
+                {
+                    "fid": fid,
+                    "result":
+                        BoxerFight.STATUS_KO if punched_trough
+                        else BoxerFight.STATUS_TIMEOUT
+                    },
+                self.pcktidmngr.getid(),
+                dest=self.server_ctx.addr
                 )
 
-            for x in range(punch_amount):
-                await fight_ctx.send_raw(punch_packet)
+            if resp["result"] == "done":
+                fight_ended = True
 
-            with trio.move_on_after(5):
-                msg = await punch_queue.receive()
-                logger.debug("got punched!")
-                punched_trough = True
+                fight_ctx.addr_whitelist.remove(self.server_ctx.addr)
+                del fight_ctx.boxes[self.server_ctx.addr]
 
-        if punched_trough:
-            await self.fights.send((fid, fight_ctx))
-            logger.info(f"punched through!")
-        else:
-            await self.fights.send((fid, None))
-            logger.warning(f"didn't punch through!")
+                await self.fights.send((fid, fight_ctx))
+            elif resp["result"] == "fail":
+                fight_ended = True
+                await self.fights.send((fid, None))
+            else:
+                logger.warning("fight retry.")
 
     async def fight(self, pkey, scope=None):
         if scope is None:

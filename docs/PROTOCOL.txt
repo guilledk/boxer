@@ -148,12 +148,42 @@ from node to server:
         "jsonrpc": "2.0",
         "result": {
             "host": "{node ip}",
-            "port": {node port}
-        }",
+            "port": {node port}"
+        },
         "id": "{uid}"
     }
 
     after that nodes can begin udp hole punching attempts
+
+    when clients are done with their punch attempts they must send a round result
+
+    ko - means the client could punch through
+
+    timeout - means the client timed out waiting for remote punch
+
+    the server will evaluate the round results and if both are ko will reply "done".
+
+    if one or more are timeouts the server will send "retry", unless it has exceded the maxium retry amount, in which case it will reply with "fail" and another fight must be started.
+
+    round:
+    ------
+
+    {
+        "jsonrpc": "2.0",
+        "method": "round",
+        "params": {
+            "fid": "{fid}",
+            "result": "{ko|timeout}",
+        },
+        "id": "{unique for this session}"
+    }
+
+    ret:
+    {
+        "jsonrpc": "2.0",
+        "result": "{done|retry|fail}",
+        "id": "{uid}"
+    }
 
 from server to node:
 
