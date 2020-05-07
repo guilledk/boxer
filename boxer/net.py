@@ -17,7 +17,11 @@ from boxer.rpc import rpc_response_mod
 logger = logging.getLogger(__name__)
 
 
-PACKET_LENGTH = 16 * 1024  # 16kb
+PACKET_LENGTH = 32 * 1024  # 16kb
+
+
+class NotInWhitelistError(Exception):
+    pass
 
 
 class UDPContext:
@@ -29,6 +33,7 @@ class UDPContext:
     """
 
     F_KEYEX = 0
+    F_DROPPED = 1
 
     def __init__(
         self,
@@ -57,7 +62,10 @@ class UDPContext:
             dest = self.addr
 
         raw_data = data
-        if encrypted and dest in self.boxes:
+        if encrypted and \
+            dest in self.boxes and \
+                self.boxes[dest] is not None:
+
             data = self.boxes[dest].encrypt(data)
 
         await self.sock.sendto(
@@ -121,7 +129,11 @@ class UDPContext:
 
             return msg
 
-    async def _bg_key_exchange(self, nursery):
+    async def _bg_key_exchange(
+        self,
+        nursery,
+        whitelist=None
+            ):
 
         # send key right away and await remote key
         nursery.start_soon(
@@ -138,25 +150,45 @@ class UDPContext:
                 ) as pkqueue:
             data = await pkqueue.receive()
 
-        self.remote_pkey = PublicKey(data)
+        rkey = PublicKey(data)
+
+        # drop context if not in whitelist
+        if (whitelist is not None) and \
+                (rkey not in whitelist):
+            await self.inbound.send(UDPContext.F_DROPPED)
+
+        self.remote_pkey = rkey
         self.boxes[self.addr] = Box(self.key, self.remote_pkey)
 
         await self.inbound.send(UDPContext.F_KEYEX)
 
     # runs background key exchange
-    def start_bgkeyex(self, nursery):
+    def start_bgkeyex(
+        self,
+        nursery,
+        whitelist=None
+            ):
+
         nursery.start_soon(
-            self._bg_key_exchange,
-            nursery
+            partial(
+                self._bg_key_exchange,
+                nursery,
+                whitelist=whitelist
+                )
             )
 
     # await until background key exchange is finished
     async def wait_keyex(self):
         async with self.inbound.subscribe(
-            lambda *args: args[0] == UDPContext.F_KEYEX,
+            lambda *args:
+                (args[0] == UDPContext.F_KEYEX) or
+                (args[0] == UDPContext.F_DROPPED),
             history=True
                 ) as queue:
-            await queue.receive()
+            res = await queue.receive()
+
+            if res == UDPContext.F_DROPPED:
+                raise NotInWhitelistError
 
     # for inbound self-generation, drops all data not from self.addr
     async def inbound_generator(self):
@@ -205,7 +237,8 @@ class UDPGate:
     def __init__(
         self,
         nursery,
-        key=None
+        key=None,
+        whitelist=None
             ):
 
         self.nursery = nursery
@@ -218,6 +251,7 @@ class UDPGate:
             )
 
         self.key = PrivateKey.generate() if key is None else key
+        self.whitelist = whitelist
 
     async def bind(
         self,
@@ -247,7 +281,8 @@ class UDPGate:
                         self.sock
                         )
                     udpctx.start_bgkeyex(
-                        self.nursery
+                        self.nursery,
+                        whitelist=self.whitelist
                         )
                     self.contexts[addr] = udpctx
                     self.nursery.start_soon(

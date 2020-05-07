@@ -8,7 +8,7 @@ from nacl.public import PublicKey, PrivateKey, Box
 
 from triopatterns import AsyncQueue, SessionIDManager
 
-from boxer.net import UDPGate
+from boxer.net import UDPGate, NotInWhitelistError
 
 from boxer.rpc import (
     JSONRPCRequest,
@@ -58,7 +58,7 @@ class BoxerRemoteNode:
         self.box = Box(self.server.key, self.key)
         self.event_queue = AsyncQueue()
         self.pcktidmngr = SessionIDManager()
-        self.rpc_cscopes = []
+        self.rpc_cscopes = {}
 
     # event outbound queue
     async def event_consumer(self):
@@ -85,7 +85,9 @@ class BoxerRemoteNode:
         methods["goodbye"] = self.boxer_goodbye
 
         local_cancel_scope = trio.CancelScope()
-        self.rpc_cscopes.append(local_cancel_scope)
+        self.rpc_cscopes[ctx] = local_cancel_scope
+
+        self.server.logger.debug(f"started rpc consumer for {ctx}")
 
         with trio.CancelScope() as local_cancel_scope:
             async with ctx.inbound.modify(
@@ -117,7 +119,7 @@ class BoxerRemoteNode:
         if hasattr(self, "event_cscope"):
             self.event_cscope.cancel()
 
-        for lcscope in self.rpc_cscopes:
+        for lcscope in self.rpc_cscopes.values():
             lcscope.cancel()
 
     def __repr__(self):
@@ -364,6 +366,11 @@ class BoxerRemoteNode:
             i = 0
             for node_ctx in fight.ctxts:
 
+                # if fight ended discard both contexts
+                if ret != "retry":
+                    self.server.logger.debug(f"stop {ctx} rpc scope: {node_ctx in self.rpc_cscopes}")
+                    # self.rpc_cscopes[node_ctx].cancel()
+
                 self.server.nursery.start_soon(
                     node_ctx.send_json,
                     JSONRPCResponseResult(
@@ -398,21 +405,29 @@ class BoxerServer:
         else:
             self.key = PrivateKey(bytes.fromhex(key))
 
-        self.gate = UDPGate(
-            nursery,
-            key=self.key
-            )
-
         self.nodes = {}
         self.fights = {}
         self.fightidmngr = SessionIDManager()
 
-    async def init(
-        self,
-        log_path="boxer.log"
-            ):
+        self.logger = logging.getLogger(__name__)
 
-        self.log_file = await trio.open_file(log_path, "w")
+    async def init(self):
+
+        whitelist = None
+        if await trio.Path("whitelist").exists():
+            async with await trio.open_file("whitelist", "r") as wlistf:
+                whitelist = [
+                    PublicKey(bytes.fromhex(line.rstrip()))
+                    for line in await wlistf.readlines()
+                    ]
+
+            self.logger.debug(f"loaded whitelist of size {len(whitelist)}.")
+
+        self.gate = UDPGate(
+            self.nursery,
+            key=self.key,
+            whitelist=whitelist
+            )
 
         await self.gate.bind(
             (self.host, self.port),
@@ -423,12 +438,14 @@ class BoxerServer:
         for node in self.nodes.values():
             await node.stop()
 
-        if hasattr(self, "log_file"):
-            await self.log_file.aclose()
-
     async def new_connection(self, ctx):
 
-        await ctx.wait_keyex()
+        try:
+            await ctx.wait_keyex()
+
+        except NotInWhitelistError:
+            self.logger.warning(f"dropped {ctx.addr}. reason: not in whitelist.")
+            return
 
         if ctx.remote_pkey not in self.nodes:
             self.nodes[ctx.remote_pkey] = BoxerRemoteNode(
