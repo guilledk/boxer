@@ -218,7 +218,7 @@ class BoxerNode:
                 )
             )
 
-        punch_total_len = 256
+        punch_total_len = 1024 * 8
         punch_packet = b"punch"
         punch_garbage_len = punch_total_len - 1 - len(punch_packet)
         punched_trough = False
@@ -287,11 +287,14 @@ class BoxerNode:
                 del fight_ctx.boxes[self.server_ctx.addr]
 
                 await self.fights.send((fid, fight_ctx))
+                logger.warning("boxer punch through.")
+
             elif resp["result"] == "fail":
                 fight_ended = True
                 await self.fights.send((fid, None))
+                logger.warning("boxer punch failure.")
             else:
-                logger.warning("fight retry.")
+                logger.warning("boxer punch error. retrying...")
 
     async def fight(self, pkey, scope=None):
         if scope is None:

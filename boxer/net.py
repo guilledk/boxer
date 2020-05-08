@@ -24,6 +24,10 @@ class NotInWhitelistError(Exception):
     pass
 
 
+class RPCTimeoutError(Exception):
+    pass
+
+
 class UDPContext:
     """
     A UDP Context represents a  conection with a remote udp endpoint at "addr",
@@ -99,8 +103,8 @@ class UDPContext:
         pid,
         encrypted=True,
         timeout=5,
-        dest=None,
-        box=None
+        max_attempts=3,
+        dest=None
             ):
 
         async with self.inbound.modify(
@@ -109,7 +113,8 @@ class UDPContext:
                 ) as resp_queue:
 
             msg = None
-            while msg is None:
+            attempt = 1
+            while (msg is None) and (attempt <= max_attempts):
                 with trio.move_on_after(timeout):
                     await self.send_json(
                         {
@@ -125,7 +130,14 @@ class UDPContext:
                     msg = await resp_queue.receive()
 
                 if msg is None:
-                    logger.warning(f"rpc timeout {pid}.")
+                    logger.warning(
+                        f"rpc timeout {pid}, attempt number {attempt}."
+                        )
+
+                attempt += 1
+
+            if msg is None:
+                raise RPCTimeoutError
 
             return msg
 

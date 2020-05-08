@@ -30,12 +30,14 @@ class BoxerFight:
         self.fid = fid
         self.round = 1
 
+        self.nodes = {}
         self.ctxts = {}
         self.status = {}
         self.pids = {}
 
-    def addctx(self, ctx, punch_id):
+    def addctx(self, node, ctx, punch_id):
 
+        self.nodes[ctx] = node
         self.ctxts[ctx] = ctx
         self.status[ctx] = BoxerFight.STATUS_FIGHT
 
@@ -60,6 +62,7 @@ class BoxerRemoteNode:
         self.box = Box(self.server.key, self.key)
         self.event_queue = AsyncQueue()
         self.pcktidmngr = SessionIDManager()
+        self.pid_history = {}
         self.rpc_cscopes = {}
 
     # event outbound queue
@@ -78,14 +81,6 @@ class BoxerRemoteNode:
     # rpc inbound queue
     async def rpc_request_consumer(self, ctx):
 
-        methods = {}
-
-        methods["introduction"] = self.boxer_introduction
-        methods["fight"] = self.boxer_fight
-        methods["punch"] = self.boxer_punch
-        methods["round"] = self.boxer_round
-        methods["goodbye"] = self.boxer_goodbye
-
         local_cancel_scope = trio.CancelScope()
         self.rpc_cscopes[ctx] = local_cancel_scope
 
@@ -98,22 +93,23 @@ class BoxerRemoteNode:
                 while True:
                     cmd = await rpc_queue.receive()
 
-                    method = cmd["method"]
-                    if method in methods:
+                    if cmd["id"] not in self.pid_history:
+
                         self.server.nursery.start_soon(
-                            methods[method],
-                            cmd["params"],
+                            self.server.eval,
+                            self,
                             ctx,
-                            cmd["id"]
+                            cmd
                             )
 
                     else:
-                        await ctx.send_json(
-                            JSONRPCResponseError(
-                                "0",
-                                "protocol error",
-                                cmd["id"]
-                                ).as_json()
+                        logger.warning(
+                            f"repeated packet \"{cmd['id']}\" at {self}."
+                            )
+
+                        self.server.nursery.start_soon(
+                            ctx.send_json,
+                            self.pid_history[cmd["id"]]
                             )
 
     async def stop(self):
@@ -127,270 +123,6 @@ class BoxerRemoteNode:
     def __repr__(self):
         return repr(self.main_ctx)
 
-    # boxer protocol method implementations
-
-    async def boxer_introduction(self, params, ctx, id):
-
-        # validate params & load node info
-        if "name" not in params:
-            await ctx.send_json(
-                JSONRPCResponseError(
-                    "0",
-                    "protocol error",
-                    id
-                    ).as_json()
-                )
-            return
-
-        self.name = params["name"]
-
-        if "desc" in params:
-            self.desc = params["desc"]
-
-        self.secret = "secret" in params
-
-        # respond
-        await ctx.send_json(
-            JSONRPCResponseResult(
-                "ok",
-                id
-                ).as_json()
-            )
-
-        # if not secret broadcast node introduction event
-        if not self.secret:
-            event_params = {
-                "type": "introduction",
-                "pkey": bytes(self.key).hex(),
-                "name": self.name
-                }
-            if hasattr(self, "desc"):
-                event_params["desc"] = self.desc
-
-            await self.server.broadcast(
-                event_params,
-                self
-                )
-
-        # send node directory as introduction events
-        nodes = [
-            item for item in self.server.nodes.items()
-            if item[0] != self.key
-        ]
-        for nkey, node in nodes:
-
-            # check if node has been introduced
-            # TODO: if this happens the server should send the intro later
-            if not hasattr(node, "name"):
-                continue
-
-            event_params = {
-                "type": "introduction",
-                "pkey": bytes(nkey).hex(),
-                "name": node.name
-                }
-            if hasattr(node, "desc"):
-                event_params["desc"] = node.desc
-
-            await self.event_queue.send(event_params)
-
-        # finally begin sending events to new node
-        self.server.nursery.start_soon(
-            self.event_consumer
-            )
-
-    async def boxer_goodbye(self, params, ctx, id):
-
-        if not self.secret:
-            await self.server.broadcast(
-                {
-                    "type": "goodbye",
-                    "pkey": bytes(self.key).hex()
-                    },
-                self
-                )
-
-        del self.server.nodes[self.key]
-
-        await ctx.send_json(
-            JSONRPCResponseResult(
-                "goodbye",
-                id
-                ).as_json()
-            )
-
-        await self.stop()
-
-    async def boxer_fight(self, params, ctx, id):
-
-        # validate params
-        if "target" not in params:
-            await ctx.send_json(
-                JSONRPCResponseError(
-                    "0",
-                    "protocol error",
-                    id
-                    ).as_json()
-                )
-            return
-
-        tkey = PublicKey(bytes.fromhex(params["target"]))
-
-        if tkey not in self.server.nodes:
-            await ctx.send_json(
-                JSONRPCResponseError(
-                    "1",
-                    "node not found",
-                    id
-                    ).as_json()
-                )
-
-        elif tkey == ctx.remote_pkey:
-            await ctx.send_json(
-                JSONRPCResponseError(
-                    "2",
-                    "dont hit yourself",
-                    id
-                    ).as_json()
-                )
-
-        else:
-
-            target_node = self.server.nodes[tkey]
-
-            fight = BoxerFight(self.server.fightidmngr.getid())
-
-            self.server.fights[fight.fid] = fight
-
-            # send fight req to target node
-            resp = await target_node.main_ctx.rpc(
-                "fight",
-                {
-                    "with": bytes(self.key).hex(),
-                    "fid": fight.fid
-                    },
-                target_node.pcktidmngr.getid()
-                )
-
-            result = resp["result"]
-            if result == "take":
-                result = fight.fid
-            else:
-                del self.server.fights[fight.fid]
-
-            await ctx.send_json(
-                JSONRPCResponseResult(
-                    result,
-                    id
-                    ).as_json()
-                )
-
-    async def boxer_punch(self, params, ctx, id):
-
-        if "fid" not in params:
-            await ctx.send_json(
-                JSONRPCResponseError(
-                    "0",
-                    "protocol error",
-                    id
-                    ).as_json()
-                )
-            return
-
-        # add context to fight dict
-        fid = params["fid"]
-        fight = self.server.fights[fid]
-        fight.addctx(ctx, id)
-
-        # if this node is  the last one to  punch, begin udp  external endpoint
-        # exchange
-        if len(fight.ctxts) == 2:
-            other_ctx = [c for c in fight.ctxts if c != ctx][0]
-
-            self.server.nursery.start_soon(
-                ctx.send_json,
-                JSONRPCResponseResult(
-                    {
-                        "host": other_ctx.addr[0],
-                        "port": other_ctx.addr[1]
-                        },
-                    fight.pids[ctx]["punch_id"]
-                    ).as_json()
-                )
-
-            self.server.nursery.start_soon(
-                other_ctx.send_json,
-                JSONRPCResponseResult(
-                    {
-                        "host": ctx.addr[0],
-                        "port": ctx.addr[1]
-                        },
-                    fight.pids[other_ctx]["punch_id"]
-                    ).as_json()
-                )
-
-    async def boxer_round(self, params, ctx, id):
-
-        if "fid" not in params or \
-                "result" not in params:
-            await ctx.send_json(
-                JSONRPCResponseError(
-                    "0",
-                    "protocol error",
-                    id
-                    ).as_json()
-                )
-            return
-
-        fid = params["fid"]
-        result = params["result"]
-
-        fight = self.server.fights[fid]
-
-        fight.pids[ctx]["round_id"] = id
-        fight.status[ctx] = result
-
-        # if round is finished
-        if BoxerFight.STATUS_FIGHT not in fight.status.values():
-
-            ret = ""
-
-            done = True
-            for val in fight.status.values():
-                done &= val == BoxerFight.STATUS_KO
-
-            if done:
-                ret = "done"
-                del self.server.fights[fight.fid]
-
-            elif fight.round > self.server.max_rounds:
-                ret = "fail"
-                del self.server.fights[fight.fid]
-
-            else:
-                ret = "retry"
-                for c in fight.status:
-                    fight.status[c] = BoxerFight.STATUS_FIGHT
-
-                fight.round += 1
-
-            i = 0
-            for node_ctx in fight.ctxts:
-
-                # if fight ended discard both contexts
-                if ret != "retry":
-                    logger.debug(f"stop {node_ctx} rpc scope: {node_ctx in self.rpc_cscopes}")
-                    # self.rpc_cscopes[node_ctx].cancel()
-
-                self.server.nursery.start_soon(
-                    node_ctx.send_json,
-                    JSONRPCResponseResult(
-                        ret,
-                        fight.pids[node_ctx]["round_id"]
-                        ).as_json()
-                    )
-                i += 1
-
 
 class BoxerServer:
 
@@ -403,7 +135,7 @@ class BoxerServer:
         host="0.0.0.0",
         port=12000,
         key=None,
-        max_rounds=5
+        max_rounds=2
             ):
 
         self.nursery = nursery
@@ -478,6 +210,307 @@ class BoxerServer:
         for node in target_nodes:
             await node.event_queue.send(event)
 
+    """
+    BOXER PROTOCOL IMPLEMENTATIONS
+    """
+
+    async def boxer_introduction(self, params, node, ctx, pid):
+
+        # validate params & load node info
+        if "name" not in params:
+            return JSONRPCResponseError(
+                "0",
+                "protocol error",
+                pid
+                ).as_json()
+
+        node.name = params["name"]
+
+        if "desc" in params:
+            node.desc = params["desc"]
+
+        node.secret = "secret" in params
+
+        # if not secret broadcast node introduction event
+        if not node.secret:
+            event_params = {
+                "type": "introduction",
+                "pkey": bytes(node.key).hex(),
+                "name": node.name
+                }
+            if hasattr(node, "desc"):
+                event_params["desc"] = node.desc
+
+            await self.broadcast(
+                event_params,
+                node
+                )
+
+        # send node directory as introduction events
+        nodes = [
+            item for item in self.nodes.items()
+            if item[0] != node.key
+        ]
+        for nkey, node in nodes:
+
+            # check if node has been introduced
+            # TODO: if this happens the server should send the intro later
+            if not hasattr(node, "name"):
+                continue
+
+            event_params = {
+                "type": "introduction",
+                "pkey": bytes(nkey).hex(),
+                "name": node.name
+                }
+            if hasattr(node, "desc"):
+                event_params["desc"] = node.desc
+
+            await node.event_queue.send(event_params)
+
+        # finally begin sending events to new node
+        self.nursery.start_soon(
+            node.event_consumer
+            )
+
+        return JSONRPCResponseResult(
+            "ok",
+            pid
+            ).as_json()
+
+    async def boxer_goodbye(self, params, node, ctx, pid):
+
+        if not node.secret:
+            await self.broadcast(
+                {
+                    "type": "goodbye",
+                    "pkey": bytes(node.key).hex()
+                    },
+                node
+                )
+
+        del self.nodes[node.key]
+
+        await node.stop()
+
+        return JSONRPCResponseResult(
+            "goodbye",
+            pid
+            ).as_json()
+
+    async def boxer_fight(self, params, node, ctx, pid):
+
+        # validate params
+        if "target" not in params:
+            return JSONRPCResponseError(
+                "0",
+                "protocol error",
+                pid
+                ).as_json()
+
+        tkey = PublicKey(bytes.fromhex(params["target"]))
+
+        if tkey not in self.nodes:
+            return JSONRPCResponseError(
+                "1",
+                "node not found",
+                id
+                ).as_json()
+
+        elif tkey == ctx.remote_pkey:
+            return JSONRPCResponseError(
+                "2",
+                "dont hit yourself",
+                id
+                ).as_json()
+
+        else:
+
+            target_node = self.nodes[tkey]
+
+            fight = BoxerFight(self.fightidmngr.getid())
+
+            self.fights[fight.fid] = fight
+
+            # send fight req to target node
+            resp = await target_node.main_ctx.rpc(
+                "fight",
+                {
+                    "with": bytes(node.key).hex(),
+                    "fid": fight.fid
+                    },
+                target_node.pcktidmngr.getid()
+                )
+
+            result = resp["result"]
+            if result == "take":
+                result = fight.fid
+            else:
+                del self.fights[fight.fid]
+
+            return JSONRPCResponseResult(
+                result,
+                pid
+                ).as_json()
+
+    async def boxer_punch(self, params, node, ctx, pid):
+
+        if "fid" not in params:
+            return JSONRPCResponseError(
+                "0",
+                "protocol error",
+                pid
+                ).as_json()
+
+        # add context to fight dict
+        fid = params["fid"]
+        fight = self.fights[fid]
+        fight.addctx(node, ctx, pid)
+
+        # if this node is  the last one to  punch, begin udp  external endpoint
+        # exchange
+        if len(fight.ctxts) == 2:
+            other_ctx = [c for c in fight.ctxts if c != ctx][0]
+            other_node = fight.nodes[other_ctx]
+
+            node_pid = fight.pids[ctx]["punch_id"]
+            onode_pid = fight.pids[other_ctx]["punch_id"]
+
+            node.pid_history[node_pid] = \
+                JSONRPCResponseResult(
+                    {
+                        "host": other_ctx.addr[0],
+                        "port": other_ctx.addr[1]
+                        },
+                    node_pid
+                    ).as_json()
+
+            other_node.pid_history[onode_pid] = \
+                JSONRPCResponseResult(
+                    {
+                        "host": ctx.addr[0],
+                        "port": ctx.addr[1]
+                        },
+                    onode_pid
+                    ).as_json()
+
+            self.nursery.start_soon(
+                ctx.send_json,
+                node.pid_history[node_pid]
+                )
+
+            self.nursery.start_soon(
+                other_ctx.send_json,
+                other_node.pid_history[onode_pid]
+                )
+
+        return None
+
+    async def boxer_round(self, params, node, ctx, pid):
+
+        if "fid" not in params or \
+                "result" not in params:
+            return JSONRPCResponseError(
+                "0",
+                "protocol error",
+                pid
+                ).as_json()
+
+        fid = params["fid"]
+        result = params["result"]
+
+        fight = self.fights[fid]
+
+        fight.pids[ctx]["round_id"] = pid
+        fight.status[ctx] = result
+
+        # if round is finished
+        if BoxerFight.STATUS_FIGHT not in fight.status.values():
+
+            ret = ""
+
+            done = True
+            for val in fight.status.values():
+                done &= val == BoxerFight.STATUS_KO
+
+            if done:
+                ret = "done"
+                del self.fights[fight.fid]
+
+            elif fight.round > self.max_rounds:
+                ret = "fail"
+                del self.fights[fight.fid]
+
+            else:
+                ret = "retry"
+                for c in fight.status:
+                    fight.status[c] = BoxerFight.STATUS_FIGHT
+
+                fight.round += 1
+
+            i = 0
+            for node_ctx in fight.ctxts:
+
+                _node = fight.nodes[node_ctx]
+
+                # if fight ended discard both contexts
+                if ret != "retry":
+                    logger.debug(f"stop {node_ctx}")
+                    _node.rpc_cscopes[node_ctx].cancel()
+
+                round_pid = fight.pids[node_ctx]["round_id"]
+
+                _node.pid_history[round_pid] = \
+                    JSONRPCResponseResult(
+                        ret,
+                        round_pid
+                        ).as_json()
+
+                self.nursery.start_soon(
+                    node_ctx.send_json,
+                    _node.pid_history[round_pid]
+                    )
+                i += 1
+
+        return None
+
+    """
+    RPC EVALUTATION
+    """
+
+    async def eval(self, node, ctx, cmd):
+
+        methods = {}
+
+        methods["introduction"] = self.boxer_introduction
+        methods["fight"] = self.boxer_fight
+        methods["punch"] = self.boxer_punch
+        methods["round"] = self.boxer_round
+        methods["goodbye"] = self.boxer_goodbye
+
+        method = cmd["method"]
+        if method in methods:
+            res = await methods[method](
+                cmd["params"],
+                node,
+                ctx,
+                cmd["id"]
+                )
+
+        else:
+            res = JSONRPCResponseError(
+                "0",
+                "protocol error",
+                cmd["id"]
+                ).as_json()
+
+        node.pid_history[cmd["id"]] = res
+
+        if res is not None:
+            await ctx.send_json(
+                res
+                )
+
 
 async def start_server():
 
@@ -506,7 +539,7 @@ async def start_server():
         server = BoxerServer(
             nursery,
             key=args.key if args.key else None,
-            max_rounds=args.rounds if args.rounds else 5
+            max_rounds=args.rounds if args.rounds else 2
             )
 
         await server.init()
