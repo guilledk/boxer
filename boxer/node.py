@@ -32,6 +32,14 @@ class PunchTimeoutError(Exception):
     pass
 
 
+class NodeNotFoundError(Exception):
+    pass
+
+
+class DontHitYourselfError(Exception):
+    pass
+
+
 class BoxerNode:
 
     def __init__(
@@ -299,27 +307,34 @@ class BoxerNode:
                     self.pcktidmngr.getid()
                     )
 
-                if resp["result"] == "evade":
-                    return None
+                if "result" in resp:
+                    if resp["result"] == "evade":
+                        return None
 
-                fid = resp["result"]
+                    fid = resp["result"]
 
-                async with self.fights.subscribe(
-                    lambda *args: args[0][0] == args[1],
-                    args=[fid],
-                    history=False
-                        ) as fight_queue:
+                    async with self.fights.subscribe(
+                        lambda *args: args[0][0] == args[1],
+                        args=[fid],
+                        history=False
+                            ) as fight_queue:
 
-                    self.nursery.start_soon(
-                        self._bg_fight,
-                        pkey,
-                        fid
-                        )
+                        self.nursery.start_soon(
+                            self._bg_fight,
+                            pkey,
+                            fid
+                            )
 
-                    fid, fight_ctx = await fight_queue.receive()
+                        fid, fight_ctx = await fight_queue.receive()
 
-                    if fight_ctx is not None:
-                        return fight_ctx
+                        if fight_ctx is not None:
+                            return fight_ctx
+
+                elif resp["error"]["code"] == "1":
+                    raise NodeNotFoundError
+
+                elif resp["error"]["code"] == "2":
+                    raise DontHitYourselfError
 
     async def goodbye(self):
 

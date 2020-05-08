@@ -17,6 +17,8 @@ from boxer.rpc import (
     rpc_request_mod
     )
 
+logger = logging.getLogger(__name__)
+
 
 class BoxerFight:
 
@@ -87,7 +89,7 @@ class BoxerRemoteNode:
         local_cancel_scope = trio.CancelScope()
         self.rpc_cscopes[ctx] = local_cancel_scope
 
-        self.server.logger.debug(f"started rpc consumer for {ctx}")
+        logger.debug(f"started rpc consumer for {ctx}")
 
         with trio.CancelScope() as local_cancel_scope:
             async with ctx.inbound.modify(
@@ -243,6 +245,15 @@ class BoxerRemoteNode:
                     ).as_json()
                 )
 
+        elif tkey == ctx.remote_pkey:
+            await ctx.send_json(
+                JSONRPCResponseError(
+                    "2",
+                    "dont hit yourself",
+                    id
+                    ).as_json()
+                )
+
         else:
 
             target_node = self.server.nodes[tkey]
@@ -368,7 +379,7 @@ class BoxerRemoteNode:
 
                 # if fight ended discard both contexts
                 if ret != "retry":
-                    self.server.logger.debug(f"stop {ctx} rpc scope: {node_ctx in self.rpc_cscopes}")
+                    logger.debug(f"stop {node_ctx} rpc scope: {node_ctx in self.rpc_cscopes}")
                     # self.rpc_cscopes[node_ctx].cancel()
 
                 self.server.nursery.start_soon(
@@ -409,8 +420,6 @@ class BoxerServer:
         self.fights = {}
         self.fightidmngr = SessionIDManager()
 
-        self.logger = logging.getLogger(__name__)
-
     async def init(self):
 
         whitelist = None
@@ -421,7 +430,7 @@ class BoxerServer:
                     for line in await wlistf.readlines()
                     ]
 
-            self.logger.debug(f"loaded whitelist of size {len(whitelist)}.")
+            logger.debug(f"loaded whitelist of size {len(whitelist)}.")
 
         self.gate = UDPGate(
             self.nursery,
@@ -444,7 +453,7 @@ class BoxerServer:
             await ctx.wait_keyex()
 
         except NotInWhitelistError:
-            self.logger.warning(f"dropped {ctx.addr}. reason: not in whitelist.")
+            logger.warning(f"dropped {ctx.addr}. reason: not in whitelist.")
             return
 
         if ctx.remote_pkey not in self.nodes:
@@ -471,6 +480,14 @@ class BoxerServer:
 
 
 async def start_server():
+
+    logging.basicConfig(
+        filename="boxer.log",
+        filemode="w",
+        format="%(levelname)s - %(asctime)s - %(name)s - %(message)s",
+        datefmt="%H:%M:%S",
+        level=logging.DEBUG
+        )
 
     parser = argparse.ArgumentParser()
     parser.add_argument(

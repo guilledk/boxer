@@ -82,12 +82,21 @@ from node to server:
         "id": "{unique for this session}"
     }
 
-        err invalid target:
+        err node not found (when target not found):
         {
             "jsonrpc": "2.0",
             "error": {
                 "code": "1",
                 "message": "node not found"
+            },
+            "id": "{uid}"
+        }
+        err dont hit yourself (when target its its own pkey):
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": "2",
+                "message": "dont hit yourself"
             },
             "id": "{uid}"
         }
