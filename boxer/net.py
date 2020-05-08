@@ -156,6 +156,7 @@ class UDPContext:
         if (whitelist is not None) and \
                 (rkey not in whitelist):
             await self.inbound.send(UDPContext.F_DROPPED)
+            return
 
         self.remote_pkey = rkey
         self.boxes[self.addr] = Box(self.key, self.remote_pkey)
