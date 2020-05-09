@@ -4,6 +4,7 @@ import os
 import trio
 import math
 import socket
+import random
 import logging
 
 from datetime import datetime
@@ -218,9 +219,7 @@ class BoxerNode:
                 )
             )
 
-        punch_total_len = 1024 * 8
         punch_packet = b"punch"
-        punch_garbage_len = punch_total_len - 1 - len(punch_packet)
         punched_trough = False
 
         fight_ended = False
@@ -254,6 +253,9 @@ class BoxerNode:
                     with attack_scope:
                         with trio.move_on_after(1):
                             while True:
+                                punch_total_len = random.randint(128, 1024 * 8)
+                                punch_garbage_len = \
+                                    punch_total_len - 1 - len(punch_packet)
                                 await fight_ctx.send_raw(
                                     punch_packet +
                                     b'=' +
