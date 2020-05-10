@@ -1,4 +1,4 @@
-![](logo.png)
+<img src="logo_1.5.svg" width="30%">
 
 ### Features
 
