@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 
+# until python 4.0 i must import this
+# https://www.python.org/dev/peps/pep-0563/
+from __future__ import annotations
+
 import os
 import trio
 import math
 import socket
 import random
 import logging
+
+from typing import Optional
 
 from datetime import datetime
 
@@ -15,7 +21,7 @@ from triopatterns import AsyncQueue, SessionIDManager
 
 from boxer.core import BoxerServer, BoxerFight
 
-from boxer.net import UDPContext
+from boxer.net import IPv4Address, UDPContext
 
 from boxer.rpc import (
     ServerResponseError,
@@ -45,10 +51,10 @@ class BoxerNode:
 
     def __init__(
         self,
-        server_addr,
-        nursery,
-        key=None,
-        evade_fights=False
+        server_addr: IPv4Address,
+        nursery: trio.Nursery,
+        key: Optional[PrivateKey] = None,
+        evade_fights: bool = False
             ):
 
         self.nursery = nursery
@@ -59,7 +65,7 @@ class BoxerNode:
         else:
             self.key = PrivateKey(bytes.fromhex(key))
 
-        self.node_directory = {}
+        self.node_directory: Dict[PublicKey, Dict] = {}
         self.pcktidmngr = SessionIDManager()
         self.server_ctx = UDPContext(
             server_addr,
@@ -75,10 +81,10 @@ class BoxerNode:
 
     async def introduction(
         self,
-        name,
-        desc="",
-        secret=True
-            ):
+        name: str,
+        desc: Optional[str] = "",
+        secret: bool = True
+            ) -> None:
 
         self.name = name
         self.desc = desc
@@ -112,7 +118,9 @@ class BoxerNode:
             self.rpc_request_consumer
             )
 
-    async def rpc_request_consumer(self):
+        return None
+
+    async def rpc_request_consumer(self) -> None:
 
         methods = {}
         methods["event"] = self.remote_event
@@ -142,7 +150,9 @@ class BoxerNode:
                                 ).as_json()
                             )
 
-    async def remote_event(self, params, id):
+        return None
+
+    async def remote_event(self, params: Dict, pid: str) -> None:
         etype = params["type"]
         key = params["pkey"]
 
@@ -158,7 +168,9 @@ class BoxerNode:
 
         await self.events.send(params)
 
-    async def remote_fight(self, params, pid):
+        return None
+
+    async def remote_fight(self, params, pid) -> None:
         if self.evade_fights:
             result = "evade"
         else:
@@ -176,11 +188,13 @@ class BoxerNode:
                 ).as_json()
             )
 
+        return None
+
     async def _bg_fight(
         self,
-        nkey,
-        fid
-            ):
+        nkey: str,
+        fid: str
+            ) -> None:
 
         # create new udp context with server
 
@@ -298,7 +312,14 @@ class BoxerNode:
             else:
                 logger.warning("boxer punch error. retrying...")
 
-    async def fight(self, pkey, scope=None):
+        return None
+
+    async def fight(
+        self,
+        pkey: PublicKey,
+        scope: Optional[trio.CancelScope] = None
+            ) -> None:
+
         if scope is None:
             scope = trio.CancelScope()
 
@@ -341,7 +362,9 @@ class BoxerNode:
                 elif resp["error"]["code"] == "2":
                     raise DontHitYourselfError
 
-    async def goodbye(self):
+        return None
+
+    async def goodbye(self) -> None:
 
         with trio.move_on_after(4):
             resp = await self.server_ctx.rpc(
@@ -352,3 +375,5 @@ class BoxerNode:
             self.rpc_cscope.cancel()
 
         self.server_ctx.stop_inbound()
+
+        return None

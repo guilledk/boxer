@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 
+# until python 4.0 i must import this
+# https://www.python.org/dev/peps/pep-0563/
+from __future__ import annotations
+
 import trio
 import logging
 import argparse
+
+from typing import Dict, Union
 
 from nacl.public import PublicKey, PrivateKey, Box
 
 from triopatterns import AsyncQueue, SessionIDManager
 
-from boxer.net import UDPGate, NotInWhitelistError
+from boxer.net import IPv4Address, UDPGate, NotInWhitelistError
 
 from boxer.rpc import (
     JSONRPCRequest,
@@ -26,33 +32,45 @@ class BoxerFight:
     STATUS_KO = "ko"
     STATUS_TIMEOUT = "timeout"
 
-    def __init__(self, fid):
+    def __init__(
+        self,
+        fid: str
+            ):
+
         self.fid = fid
         self.round = 1
 
-        self.nodes = {}
-        self.ctxts = {}
-        self.status = {}
-        self.pids = {}
+        self.nodes: Dict[UDPContext, BoxerRemoteNode] = {}
+        self.status: Dict[UDPContext, str] = {}
+        self.ctxts: List[UDPContext] = []
+        self.pids: Dict[UDPContext, Dict[str, Union[str, int]]] = {}
 
-    def addctx(self, node, ctx, punch_id):
+    def addctx(
+        self,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        punch_id: str
+            ) -> None:
 
         self.nodes[ctx] = node
-        self.ctxts[ctx] = ctx
         self.status[ctx] = BoxerFight.STATUS_FIGHT
+
+        self.ctxts.append(ctx)
 
         self.pids[ctx] = {
             "punch_id": punch_id,
             "round_id": -1
         }
 
+        return None
+
 
 class BoxerRemoteNode:
 
     def __init__(
         self,
-        ctx,
-        server
+        ctx: UDPContext,
+        server: BoxerServer
             ):
 
         self.main_ctx = ctx
@@ -62,11 +80,12 @@ class BoxerRemoteNode:
         self.box = Box(self.server.key, self.key)
         self.event_queue = AsyncQueue()
         self.pcktidmngr = SessionIDManager()
-        self.pid_history = {}
-        self.rpc_cscopes = {}
+
+        self.pid_history: Dict[str, Dict] = {}
+        self.rpc_cscopes: Dict[UDPContext, trio.CancelScope] = {}
 
     # event outbound queue
-    async def event_consumer(self):
+    async def event_consumer(self) -> None:
         with trio.CancelScope() as self.event_cscope:
             while True:
                 event = await self.event_queue.receive()
@@ -78,8 +97,10 @@ class BoxerRemoteNode:
                         ).as_json()
                     )
 
+        return None
+
     # rpc inbound queue
-    async def rpc_request_consumer(self, ctx):
+    async def rpc_request_consumer(self, ctx: UDPContext) -> None:
 
         local_cancel_scope = trio.CancelScope()
         self.rpc_cscopes[ctx] = local_cancel_scope
@@ -112,7 +133,9 @@ class BoxerRemoteNode:
                             self.pid_history[cmd["id"]]
                             )
 
-    async def stop(self):
+        return None
+
+    async def stop(self) -> None:
 
         if hasattr(self, "event_cscope"):
             self.event_cscope.cancel()
@@ -120,7 +143,9 @@ class BoxerRemoteNode:
         for lcscope in self.rpc_cscopes.values():
             lcscope.cancel()
 
-    def __repr__(self):
+        return None
+
+    def __repr__(self) -> str:
         return repr(self.main_ctx)
 
 
@@ -131,16 +156,14 @@ class BoxerServer:
 
     def __init__(
         self,
-        nursery,
-        host="0.0.0.0",
-        port=12000,
-        key=None,
-        max_rounds=2
+        nursery: trio.Nursery,
+        addr: IPv4Address = ("0.0.0.0", 12000),
+        key: PrivateKey = None,
+        max_rounds: int = 2
             ):
 
         self.nursery = nursery
-        self.host = host
-        self.port = port
+        self.addr = addr
         self.max_rounds = max_rounds
 
         if key is None:
@@ -148,11 +171,11 @@ class BoxerServer:
         else:
             self.key = PrivateKey(bytes.fromhex(key))
 
-        self.nodes = {}
-        self.fights = {}
+        self.nodes: Dict[PublicKey, BoxerRemoteNode] = {}
+        self.fights: Dict[str, BoxerFight] = {}
         self.fightidmngr = SessionIDManager()
 
-    async def init(self):
+    async def init(self) -> None:
 
         whitelist = None
         if await trio.Path("whitelist").exists():
@@ -171,15 +194,19 @@ class BoxerServer:
             )
 
         await self.gate.bind(
-            (self.host, self.port),
+            self.addr,
             self.new_connection
             )
 
-    async def stop(self):
+        return None
+
+    async def stop(self) -> None:
         for node in self.nodes.values():
             await node.stop()
 
-    async def new_connection(self, ctx):
+        return None
+
+    async def new_connection(self, ctx: UDPContext) -> None:
 
         try:
             await ctx.wait_keyex()
@@ -200,7 +227,13 @@ class BoxerServer:
             ctx
             )
 
-    async def broadcast(self, event, origin_node):
+        return None
+
+    async def broadcast(
+        self,
+        event: Dict,
+        origin_node: BoxerRemoteNode
+            ) -> None:
 
         target_nodes = [
             node for node in self.nodes.values()
@@ -210,11 +243,19 @@ class BoxerServer:
         for node in target_nodes:
             await node.event_queue.send(event)
 
+        return None
+
     """
     BOXER PROTOCOL IMPLEMENTATIONS
     """
 
-    async def boxer_introduction(self, params, node, ctx, pid):
+    async def boxer_introduction(
+        self,
+        params: Dict,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        pid: str
+            ) -> Dict:
 
         # validate params & load node info
         if "name" not in params:
@@ -278,7 +319,13 @@ class BoxerServer:
             pid
             ).as_json()
 
-    async def boxer_goodbye(self, params, node, ctx, pid):
+    async def boxer_goodbye(
+        self,
+        params: Dict,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        pid: str
+            ) -> Dict:
 
         if not node.secret:
             await self.broadcast(
@@ -298,7 +345,13 @@ class BoxerServer:
             pid
             ).as_json()
 
-    async def boxer_fight(self, params, node, ctx, pid):
+    async def boxer_fight(
+        self,
+        params: Dict,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        pid: str
+            ) -> Dict:
 
         # validate params
         if "target" not in params:
@@ -314,14 +367,14 @@ class BoxerServer:
             return JSONRPCResponseError(
                 "1",
                 "node not found",
-                id
+                pid
                 ).as_json()
 
         elif tkey == ctx.remote_pkey:
             return JSONRPCResponseError(
                 "2",
                 "dont hit yourself",
-                id
+                pid
                 ).as_json()
 
         else:
@@ -353,7 +406,13 @@ class BoxerServer:
                 pid
                 ).as_json()
 
-    async def boxer_punch(self, params, node, ctx, pid):
+    async def boxer_punch(
+        self,
+        params: Dict,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        pid: str
+            ) -> Dict:
 
         if "fid" not in params:
             return JSONRPCResponseError(
@@ -406,7 +465,13 @@ class BoxerServer:
 
         return None
 
-    async def boxer_round(self, params, node, ctx, pid):
+    async def boxer_round(
+        self,
+        params: Dict,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        pid: str
+            ) -> Dict:
 
         if "fid" not in params or \
                 "result" not in params:
@@ -478,7 +543,12 @@ class BoxerServer:
     RPC EVALUTATION
     """
 
-    async def eval(self, node, ctx, cmd):
+    async def eval(
+        self,
+        node: BoxerRemoteNode,
+        ctx: UDPContext,
+        cmd: Dict
+            ):
 
         methods = {}
 
@@ -505,6 +575,8 @@ class BoxerServer:
                 ).as_json()
 
         node.pid_history[cmd["id"]] = res
+
+        logger.debug(f"res is: {res}")
 
         if res is not None:
             await ctx.send_json(

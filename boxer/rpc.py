@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 
+# until python 4.0 i must import this
+# https://www.python.org/dev/peps/pep-0563/
+from __future__ import annotations
+
 import json
+
+from typing import Optional, Union, Tuple, Dict
 
 from json.decoder import JSONDecodeError
 
@@ -13,7 +19,7 @@ class NodeResponseError(Exception):
     pass
 
 
-def rpc_request_mod(*args):
+def rpc_request_mod(*args) -> Tuple[bool, Dict]:
     try:
         if isinstance(args[0], bytes):
             obj = json.loads(
@@ -39,7 +45,7 @@ def rpc_request_mod(*args):
         )
 
 
-def rpc_response_mod(*args):
+def rpc_response_mod(*args) -> Tuple[bool, Dict]:
     try:
         if isinstance(args[0], bytes):
             obj = json.loads(
@@ -67,12 +73,18 @@ def rpc_response_mod(*args):
 
 class JSONRPCRequest:
 
-    def __init__(self, method, params, id):
+    def __init__(
+        self,
+        method: str,
+        params: Dict,
+        pid: str
+            ):
+
         self.method = method
         self.params = params
-        self.id = id
+        self.id = pid
 
-    def as_json(self):
+    def as_json(self) -> Dict:
         return {
             "jsonrpc": "2.0",
             "method": self.method,
@@ -83,9 +95,14 @@ class JSONRPCRequest:
 
 class JSONRPCResponseResult:
 
-    def __init__(self, result, id):
+    def __init__(
+        self,
+        result: Union[Dict, str],
+        pid: str
+            ):
+
         self.result = result
-        self.id = id
+        self.id = pid
 
     def as_json(self):
         return {
@@ -97,13 +114,20 @@ class JSONRPCResponseResult:
 
 class JSONRPCResponseError:
 
-    def __init__(self, code, msg, id, data=None):
+    def __init__(
+        self,
+        code: str,
+        msg: str,
+        pid: str,
+        data: Optional[str] = None
+            ):
+
         self.code = code
         self.msg = msg
-        self.id = id
+        self.id = pid
         self.data = data
 
-    def as_json(self):
+    def as_json(self) -> Dict:
 
         err_obj = {
             "code": self.code,

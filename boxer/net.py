@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 
+# until python 4.0 i must import this
+# https://www.python.org/dev/peps/pep-0563/
+from __future__ import annotations
+
 import trio
 import json
 import socket
 import logging
+
+from typing import Callable, Optional, Tuple, Dict
 
 from functools import partial
 
@@ -18,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 PACKET_LENGTH = 32 * 1024  # 16kb
+
+IPv4Address = Tuple[str, int]
 
 
 class NotInWhitelistError(Exception):
@@ -41,26 +49,38 @@ class UDPContext:
 
     def __init__(
         self,
-        addr,
-        key,
-        sock
+        addr: IPv4Address,
+        key: PrivateKey,
+        sock: trio.socket.socket
             ):
         self.key = key
         self.sock = sock
 
         self.inbound = AsyncQueue()
 
-        self.addr_whitelist = []
-        self.boxes = {}
+        self.addr_whitelist: List[IPv4Address] = []
+        self.boxes: Dict[IPv4Address, Box] = {}
 
         self.set_addr(addr, None)
 
-    def set_addr(self, new_addr, new_box):
+    def set_addr(
+        self,
+        new_addr: IPv4Address,
+        new_box: Optional[Box]
+            ) -> None:
+
         self.addr = new_addr
         self.boxes[new_addr] = new_box
         self.addr_whitelist.append(new_addr)
 
-    async def send_raw(self, data, encrypted=True, dest=None):
+        return None
+
+    async def send_raw(
+        self,
+        data: bytes,
+        encrypted: bool = True,
+        dest: Optional[IPv4Address] = None
+            ) -> None:
 
         if dest is None:
             dest = self.addr
@@ -79,33 +99,51 @@ class UDPContext:
 
         logger.debug(f"sent to {dest}: {raw_data}")
 
-    async def send_str(self, string, encrypted=True, dest=None):
+        return None
+
+    async def send_str(
+        self,
+        string: str,
+        encrypted: bool = True,
+        dest: Optional[IPv4Address] = None
+            ) -> None:
+
         await self.send_raw(
             string.encode("utf-8"),
             encrypted=encrypted,
             dest=dest
             )
 
-    async def send_json(self, obj, encrypted=True, dest=None):
+        return None
+
+    async def send_json(
+        self,
+        obj: str,
+        encrypted: bool = True,
+        dest: Optional[IPv4Address] = None
+            ) -> None:
+
         await self.send_str(
             json.dumps(obj),
             encrypted=encrypted,
             dest=dest
             )
 
+        return None
+
     # rpc assumes obj as "id" field and creates a subscriber queue to match the
     # response  message that  should contain the  same unique  "id" field, then
     # returns response.
     async def rpc(
         self,
-        method,
-        params,
-        pid,
-        encrypted=True,
-        timeout=5,
-        max_attempts=3,
-        dest=None
-            ):
+        method: str,
+        params: Dict,
+        pid: str,
+        encrypted: bool = True,
+        timeout: int = 5,
+        max_attempts: int = 3,
+        dest: Optional[IPv4Address] = None
+            ) -> Dict:
 
         async with self.inbound.modify(
             rpc_response_mod,
@@ -143,9 +181,9 @@ class UDPContext:
 
     async def _bg_key_exchange(
         self,
-        nursery,
-        whitelist=None
-            ):
+        nursery: trio.Nursery,
+        whitelist: Optional[PublicKey] = None
+            ) -> None:
 
         # send key right away and await remote key
         nursery.start_soon(
@@ -175,12 +213,14 @@ class UDPContext:
 
         await self.inbound.send(UDPContext.F_KEYEX)
 
+        return None
+
     # runs background key exchange
     def start_bgkeyex(
         self,
-        nursery,
-        whitelist=None
-            ):
+        nursery: trio.Nursery,
+        whitelist: Optional[PublicKey] = None
+            ) -> None:
 
         nursery.start_soon(
             partial(
@@ -190,8 +230,10 @@ class UDPContext:
                 )
             )
 
+        return None
+
     # await until background key exchange is finished
-    async def wait_keyex(self):
+    async def wait_keyex(self) -> None:
         async with self.inbound.subscribe(
             lambda *args:
                 (args[0] == UDPContext.F_KEYEX) or
@@ -203,8 +245,10 @@ class UDPContext:
             if res == UDPContext.F_DROPPED:
                 raise NotInWhitelistError
 
+        return None
+
     # for inbound self-generation, drops all data not from self.addr
-    async def inbound_generator(self):
+    async def inbound_generator(self) -> None:
         logger.debug(f"starting inbound from {self.addr}")
         with trio.CancelScope() as self.inbound_cscope:
             while True:
@@ -222,17 +266,23 @@ class UDPContext:
 
                 await self.inbound.send(data)
 
-    def start_inbound(self, nursery):
+        return None
+
+    def start_inbound(self, nursery) -> None:
         nursery.start_soon(
             self.inbound_generator
             )
 
-    def stop_inbound(self):
+        return None
+
+    def stop_inbound(self) -> None:
         if hasattr(self, "inbound_cscope"):
             self.inbound_cscope.cancel()
 
+        return None
+
     # for debug
-    def __repr__(self):
+    def __repr__(self) -> str:
         if hasattr(self, "remote_pkey"):
             return f"[{bytes(self.remote_pkey).hex()[:8]} @ {self.addr}]"
         else:
@@ -249,15 +299,15 @@ class UDPGate:
 
     def __init__(
         self,
-        nursery,
-        key=None,
-        whitelist=None
+        nursery: trio.Nursery,
+        key: PrivateKey = None,
+        whitelist: Optional[PublicKey] = None
             ):
 
         self.nursery = nursery
 
-        self.contexts = {}
-        self.conn_cb = None
+        self.contexts: Dict[IPv4Address, UDPContext] = {}
+        self.conn_cb: Optional[Callable[[UDPContext], None]] = None
         self.sock = trio.socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM
@@ -268,9 +318,10 @@ class UDPGate:
 
     async def bind(
         self,
-        addr,
-        conn_cb=None  # new connection callback
-            ):
+        addr: IPv4Address,
+        conn_cb: Optional[Callable[[UDPContext], None]] = None
+            ) -> None:
+
         await self.sock.bind(addr)
 
         logger.debug(f"bind to {addr}")
@@ -280,7 +331,9 @@ class UDPGate:
             self.inbound_generator
             )
 
-    async def inbound_generator(self):
+        return None
+
+    async def inbound_generator(self) -> None:
         with trio.CancelScope() as self.inbound_cscope:
 
             while True:
@@ -311,8 +364,12 @@ class UDPGate:
 
                 await udpctx.inbound.send(data)
 
-    def close(self):
+        return None
+
+    def close(self) -> None:
         if hasattr(self, "inbound_cscope"):
             self.inbound_cscope.cancel()
 
         self.sock.close()
+
+        return None
