@@ -97,7 +97,8 @@ class UDPContext:
             dest
             )
 
-        logger.debug(f"sent to {dest}: {raw_data}")
+        if b"punch=" not in raw_data:
+            logger.debug(f"sent to {dest}: {raw_data}")
 
         return None
 
@@ -262,7 +263,8 @@ class UDPContext:
                 if self.boxes[addr] is not None:
                     data = self.boxes[addr].decrypt(data)
 
-                logger.debug(f"inbound from {addr}: {data}")
+                if b"punch=" not in data:
+                    logger.debug(f"inbound from {addr}: {data}")
 
                 await self.inbound.send(data)
 
@@ -360,7 +362,8 @@ class UDPGate:
                     if udpctx.boxes[addr] is not None:
                         data = udpctx.boxes[addr].decrypt(data)
 
-                logger.debug(f"inbound from {addr}: {data}")
+                if b"punch=" not in data:
+                    logger.debug(f"inbound from {addr}: {data}")
 
                 await udpctx.inbound.send(data)
 
