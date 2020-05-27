@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import trio
+import uuid
 import math
 import socket
 import random
@@ -107,7 +108,7 @@ class BoxerNode:
         resp = await self.server_ctx.rpc(
             "introduction",
             params,
-            self.pcktidmngr.getid()
+            str(uuid.uuid4())
             )
 
         if resp["result"] != "ok":
@@ -212,7 +213,7 @@ class BoxerNode:
             {
                 "fid": fid
                 },
-            self.pcktidmngr.getid(),
+            str(uuid.uuid4()),
             timeout=10
             )
 
@@ -292,7 +293,7 @@ class BoxerNode:
                         BoxerFight.STATUS_KO if punched_trough
                         else BoxerFight.STATUS_TIMEOUT
                     },
-                self.pcktidmngr.getid(),
+                str(uuid.uuid4()),
                 dest=self.server_ctx.addr
                 )
 
@@ -330,7 +331,7 @@ class BoxerNode:
                     {
                         "target": pkey
                         },
-                    self.pcktidmngr.getid()
+                    str(uuid.uuid4())
                     )
 
                 if "result" in resp:
@@ -368,7 +369,7 @@ class BoxerNode:
 
         with trio.move_on_after(4):
             resp = await self.server_ctx.rpc(
-                "goodbye", {}, self.pcktidmngr.getid()
+                "goodbye", {}, str(uuid.uuid4())
                 )
 
         if hasattr(self, "rpc_cscope"):

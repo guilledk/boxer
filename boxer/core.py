@@ -93,7 +93,7 @@ class BoxerRemoteNode:
                     JSONRPCRequest(
                         "event",
                         event,
-                        self.pcktidmngr.getid()
+                        str(uuid.uuid4())
                         ).as_json()
                     )
 
@@ -274,6 +274,7 @@ class BoxerServer:
                 ).as_json()
 
         node.name = params["name"]
+        node.main_ctx = ctx
 
         if "desc" in params:
             node.desc = params["desc"]
