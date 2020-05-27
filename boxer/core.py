@@ -187,6 +187,14 @@ class BoxerServer:
 
             logger.debug(f"loaded whitelist of size {len(whitelist)}.")
 
+        if await trio.Path("key").exists():
+            async with await trio.open_file("key", "r") as keyf:
+                self.key = PrivateKey(
+                    bytes.fromhex((await keyf.read()).rstrip())
+                    )
+
+            logger.debug(f"loaded key from file.")
+
         self.gate = UDPGate(
             self.nursery,
             key=self.key,
